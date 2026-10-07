@@ -1,0 +1,19 @@
+<MyGUI type="Resource" version="1.1">
+  <Resource type="ResourceSkin" name="PanelEmpty" size="100 30"/>
+  <Resource type="ResourceSkin" name="WhiteSkin" size="2 2"/>
+  <Resource type="ResourceSkin" name="Kenshi_TextBoxEmptySkin" size="100 30"/>
+  <Resource type="ResourceSkin" name="Kenshi_GenericTextBox" size="100 30"/>
+  <Resource type="ResourceSkin" name="Kenshi_GenericTextBoxFlat" size="100 30"/>
+  <Resource type="ResourceSkin" name="Kenshi_Button1" size="100 30"/>
+  <Resource type="ResourceSkin" name="Kenshi_TickBoxSkin" size="100 30"/>
+  <Resource type="ResourceLayout" name="TestTabs" version="3.2.0">
+    <Widget type="Widget" skin="PanelEmpty" position="0 0 760 490" name="Root">
+      <UserString key="LE_TargetWidgetType" value="TabControl"/>
+      <UserString key="ButtonSkin" value="Kenshi_Button1"/>
+      <Widget type="Widget" skin="PanelEmpty" position="0 0 760 35" align="HStretch Top" name="HeaderPlace">
+        <Widget type="Widget" skin="PanelEmpty" position="0 0 760 35" align="Stretch" name="Empty"/>
+      </Widget>
+      <Widget type="Widget" skin="PanelEmpty" position="0 35 760 455" align="Stretch" name="TabItem"/>
+    </Widget>
+  </Resource>
+</MyGUI>

@@ -1,0 +1,15 @@
+[package]
+name = "rekenshi-sic"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+image = { workspace = true, features = ["png", "tga", "bmp"], default-features = false }
+serde = { workspace = true, features = ["derive"] }
+zstd = { workspace = true }

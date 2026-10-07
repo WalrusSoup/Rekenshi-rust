@@ -1,0 +1,30 @@
+<MyGUI type="Resource" version="1.1">
+  <Resource type="ResourceSkin" name="Kenshi_HealthPanelBottomSkin" size="100 30" texture="fixture">
+    <BasisSkin type="SubSkin" offset="0 0 100 30" align="Stretch">
+      <State name="normal" offset="0 0 100 30"/>
+      <State name="disabled" offset="0 0 100 30"/>
+    </BasisSkin>
+    <BasisSkin type="SimpleText" offset="0 0 100 30" align="Stretch">
+      <State name="normal" colour="0.0784314 0.0313726 0.0235294"/>
+      <State name="disabled" colour="0.625731 0.604995 0.578161"/>
+    </BasisSkin>
+  </Resource>
+  <Resource type="ResourceSkin" name="Kenshi_LifeBarSkin" size="100 30" texture="fixture">
+    <BasisSkin type="SubSkin" offset="0 0 100 30" align="Stretch">
+      <State name="normal" offset="0 0 100 30"/>
+    </BasisSkin>
+  </Resource>
+  <Resource type="ResourceSkin" name="Kenshi_GenericWindowSkin" size="100 30" texture="fixture">
+    <BasisSkin type="SubSkin" offset="0 0 100 30" align="Stretch">
+      <State name="normal" offset="0 0 100 30"/>
+    </BasisSkin>
+    <Child type="Widget" skin="Kenshi_LifeBarSkin" style="Child" offset="0 0 100 30" align="Stretch" name="Status">
+      <Property key="Colour" value="0.2 0.8 0.1"/>
+    </Child>
+  </Resource>
+  <Resource type="ResourceSkin" name="Kenshi_TickButton1Skin" size="100 30" texture="fixture">
+    <BasisSkin type="SubSkin" offset="0 0 100 30" align="Stretch">
+      <State name="normal" offset="0 0 100 30"/>
+    </BasisSkin>
+  </Resource>
+</MyGUI>

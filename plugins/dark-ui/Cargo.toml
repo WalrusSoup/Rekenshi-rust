@@ -1,0 +1,16 @@
+[package]
+name = "rekenshi-dark-ui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+detour.workspace = true
+rekenshi-native.workspace = true
+rekenshi-plugin-runtime.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation"] }

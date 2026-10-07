@@ -1,0 +1,9 @@
+# Load only listed, enabled DLLs from RE_Kenshi_Rust/plugins.
+# Order is start order; shutdown runs in reverse. Restart Kenshi after changes.
+schema_version = 1
+discover = true
+
+plugins = []
+
+# Internal plugins are linked into RE_Kenshi_Rust.dll. Control them in Options -> REKENSHI-RUST.
+# Add third-party DLL plugins here; their changes take effect after restarting.

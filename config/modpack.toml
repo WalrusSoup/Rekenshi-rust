@@ -1,0 +1,11 @@
+schema_version = 1
+
+[settings.values]
+"performance.shader_cache" = true
+"performance.heightmap_cache" = false
+"performance.collider_cache" = false
+"performance.dds_mip_skip" = false
+"performance.compressed_textures" = false
+"ui.dark_mode" = true
+"ui.panel_brightness" = 0.6
+"weather.tone_down" = true

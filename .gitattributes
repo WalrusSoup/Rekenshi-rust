@@ -1,0 +1,3 @@
+* text=auto eol=lf
+# Preserve the vendored guideline snapshot byte-for-byte for its recorded checksum.
+docs/guidelines/microsoft-rust-guidelines.txt -text -whitespace

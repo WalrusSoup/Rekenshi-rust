@@ -1,0 +1,147 @@
+[package]
+name = "rekenshi-rust"
+version = "0.4.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Experimental Rust Ogre plugin for Kenshi"
+
+[workspace]
+resolver = "3"
+members = [
+    "tools/cargo-rekenshi",
+    "crates/plugin-api",
+    "crates/native",
+    "crates/plugin-runtime",
+    "crates/plugin-sdk",
+    "crates/sic",
+    "plugins/shader-cache",
+    "plugins/heightmap-cache",
+    "plugins/collider-cache",
+    "plugins/dds-mip-skip",
+    "plugins/compressed-textures",
+    "plugins/graphics",
+    "plugins/weather",
+    "plugins/dark-ui",
+    "samples/color-grade",
+    "samples/color-grade-dll",
+    "samples/rain-refinement",
+    "samples/kenshi2-style",
+    "samples/callback-counter",
+    "samples/squad-inspector",
+    "compat/shader-cache",
+    "compat/graphics",
+    "compat/color-grade",
+    "examples/dll-plugins/diagnostics",
+    "tests/fixtures/incompatible",
+    "tests/fixtures/reject",
+    "tests/fixtures/lifecycle",
+    "tests/fixtures/gameplay-probe",
+]
+default-members = [".", "samples/kenshi2-style"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+cargo-rekenshi = { version = "0.1.0", path = "tools/cargo-rekenshi" }
+fixture-incompatible = { version = "0.1.0", path = "tests/fixtures/incompatible" }
+fixture-lifecycle = { version = "0.1.0", path = "tests/fixtures/lifecycle" }
+fixture-reject = { version = "0.1.0", path = "tests/fixtures/reject" }
+rekenshi-callback-counter = { version = "0.1.0", path = "samples/callback-counter" }
+rekenshi-collider-cache = { version = "0.1.0", path = "plugins/collider-cache" }
+rekenshi-color-grade = { version = "0.1.0", path = "samples/color-grade" }
+rekenshi-color-grade-compat = { version = "0.1.0", path = "compat/color-grade" }
+rekenshi-color-grade-dll = { version = "0.1.0", path = "samples/color-grade-dll" }
+rekenshi-compressed-textures = { version = "0.1.0", path = "plugins/compressed-textures" }
+rekenshi-dds-mip-skip = { version = "0.1.0", path = "plugins/dds-mip-skip" }
+rekenshi-diagnostics = { version = "0.1.0", path = "examples/dll-plugins/diagnostics" }
+rekenshi-gameplay-probe = { version = "0.1.0", path = "tests/fixtures/gameplay-probe" }
+rekenshi-graphics = { version = "0.1.0", path = "plugins/graphics" }
+rekenshi-graphics-compat = { version = "0.1.0", path = "compat/graphics" }
+rekenshi-heightmap-cache = { version = "0.1.0", path = "plugins/heightmap-cache" }
+rekenshi-kenshi2-style = { version = "0.1.0", path = "samples/kenshi2-style" }
+rekenshi-native = { version = "0.1.0", path = "crates/native" }
+rekenshi-plugin-api = { version = "0.1.0", path = "crates/plugin-api" }
+rekenshi-plugin-runtime = { version = "0.1.0", path = "crates/plugin-runtime" }
+rekenshi-plugin-sdk = { version = "0.1.0", path = "crates/plugin-sdk" }
+rekenshi-rain-refinement = { version = "0.1.0", path = "samples/rain-refinement" }
+rekenshi-rust = { version = "0.4.0", path = "." }
+rekenshi-shader-cache = { version = "0.1.0", path = "plugins/shader-cache" }
+rekenshi-shader-cache-compat = { version = "0.1.0", path = "compat/shader-cache" }
+rekenshi-sic = { version = "0.1.0", path = "crates/sic" }
+rekenshi-squad-inspector = { version = "0.1.0", path = "samples/squad-inspector" }
+rekenshi-weather = { version = "0.1.0", path = "plugins/weather" }
+rekenshi-dark-ui = { version = "0.1.0", path = "plugins/dark-ui" }
+detour = "=0.10.0"
+image = { version = "=0.25.5", default-features = false }
+memmap2 = "0.9.11"
+serde = "1.0.229"
+serde_json = "1.0.151"
+sha2 = "0.10"
+toml = "0.8"
+windows = "0.62"
+windows-sys = "0.61"
+zstd = "0.13"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+redundant_lifetimes = "warn"
+unused_lifetimes = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+
+[lib]
+name = "RE_Kenshi_Rust"
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "plugin-smoke"
+path = "src/bin/plugin_smoke.rs"
+
+[[bin]]
+name = "hook-list"
+path = "src/bin/hook_list.rs"
+
+[[bin]]
+name = "pack-config"
+path = "src/bin/pack_config.rs"
+
+[[bin]]
+name = "texture-pack"
+path = "src/bin/texture_pack.rs"
+
+[dependencies]
+detour = { workspace = true }
+rekenshi-collider-cache = { workspace = true }
+rekenshi-compressed-textures = { workspace = true }
+rekenshi-dark-ui.workspace = true
+rekenshi-dds-mip-skip = { workspace = true }
+rekenshi-graphics = { workspace = true }
+rekenshi-heightmap-cache = { workspace = true }
+rekenshi-native = { workspace = true }
+rekenshi-plugin-api = { workspace = true }
+rekenshi-plugin-runtime = { workspace = true }
+rekenshi-shader-cache = { workspace = true }
+rekenshi-sic = { workspace = true }
+rekenshi-weather.workspace = true
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
+toml = { workspace = true }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Diagnostics_Debug"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# Keep unwinding so exported entry points can contain Rust panics.
+panic = "unwind"
+
+[lints]
+workspace = true

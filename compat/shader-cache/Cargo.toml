@@ -1,0 +1,19 @@
+[package]
+name = "rekenshi-shader-cache-compat"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rekenshi_shader_cache"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+rekenshi-native = { workspace = true }
+rekenshi-plugin-api = { workspace = true }
+rekenshi-shader-cache = { workspace = true }

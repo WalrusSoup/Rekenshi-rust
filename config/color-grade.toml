@@ -1,0 +1,9 @@
+# World only, after tonemapping and before GUI. Tint/priority are startup settings.
+# Built-in enabled/contrast/saturation/brightness use modpack.toml and the menu;
+# values below also support the standalone compatibility DLL and first migration.
+enabled = true
+contrast = 1.06
+saturation = 1.08
+brightness = 1.0
+tint = [1.02, 1.0, 0.98]
+priority = 100

@@ -1,0 +1,16 @@
+[package]
+name = "rekenshi-color-grade-dll"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+[lib]
+name = "rekenshi_color_grade_sample"
+crate-type = ["cdylib"]
+[lints]
+workspace = true
+
+[dependencies]
+rekenshi-color-grade = { workspace = true }
+rekenshi-plugin-sdk = { workspace = true }

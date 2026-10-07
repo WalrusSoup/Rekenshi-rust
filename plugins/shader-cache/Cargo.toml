@@ -1,0 +1,19 @@
+[package]
+name = "rekenshi-shader-cache"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+detour = { workspace = true }
+rekenshi-native = { workspace = true }
+rekenshi-plugin-api = { workspace = true }
+rekenshi-plugin-runtime = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
+toml = { workspace = true }

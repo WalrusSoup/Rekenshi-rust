@@ -1,0 +1,5 @@
+# Shader-cache budget is read at startup. Bytecode survives process restarts.
+# Built-in shader_cache uses modpack.toml and the menu; this value also supports
+# the standalone compatibility DLL and first migration.
+shader_cache = true
+max_cache_mb = 512

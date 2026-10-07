@@ -1,0 +1,10 @@
+[package]
+name = "__ID__"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+[lib]
+crate-type = ["cdylib"]
+# Independent project: no host registration or workspace edits required.
+[workspace]

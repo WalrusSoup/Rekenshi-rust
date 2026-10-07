@@ -1,0 +1,11 @@
+[package]
+name = "cargo-rekenshi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Create independent Rust DLL mods for Kenshi"
+
+[lints]
+workspace = true
