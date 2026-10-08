@@ -13,7 +13,7 @@ import xml.etree.ElementTree as E
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-def child(folder):
+def child(folder,public=False):
     C.CDLL(str(folder / 'OgreMain_x64.dll'))
     C.CDLL(str(folder / 'D3DCompiler_43.dll'))
     native = C.CDLL(str(folder / 'native-menu.dll'))
@@ -53,6 +53,22 @@ def child(folder):
     assert 'dark UI: native skin creation' in (folder / 'RE_Kenshi_Rust.log').read_text()
     native.theme_render_setup()
     panel = native.theme_create(b'Kenshi_HealthPanelBottomSkin', b'ThemeHud')
+    if public:
+        assert host.rekenshi_plugins_loaded()==1,(folder/'RE_Kenshi_Rust.log').read_text()
+        set_value('ui.dark_mode',1,0)
+        native.theme_set_colour(panel,0.9,0.6,0.4,1.)
+        assert abs(tint()[0]-63)<=1,tint()
+        sample=C.CDLL(str(folder/'RE_Kenshi_Rust/plugins/rekenshi_source_transform.dll'))
+        sample.rekenshi_widget_events.restype=C.c_uint64
+        assert sample.rekenshi_widget_events()==0
+        assert sample.rekenshi_plugin_dispatch(1)==0
+        assert sample.rekenshi_widget_events()>=2
+        native.theme_destroy(panel)
+        assert sample.rekenshi_plugin_dispatch(1)==0
+        assert sample.rekenshi_widget_events()>=3
+        host.dllStopPlugin();native.menu_shutdown()
+        print('PASS: independent owned theme color, deferred copied skin/initialization/destruction observations')
+        return
     assert all(abs(a-b) <= 1 for a,b in zip(tint(), [135, 153, 171])), tint()
     # Default skin text, including state changes, flows through the final text path.
     initial = colour(panel)
@@ -116,7 +132,7 @@ def child(folder):
 
 if __name__ == '__main__':
     if sys.argv[1] == '--child':
-        child(pathlib.Path(sys.argv[2]))
+        child(pathlib.Path(sys.argv[2]),len(sys.argv)>3 and sys.argv[3]=='public')
     else:
         folder = ROOT / 'target/dark-ui-tests' / uuid.uuid4().hex
         folder.mkdir(parents=True)
@@ -130,3 +146,10 @@ if __name__ == '__main__':
         shutil.copy2(ROOT / 'config/modpack.toml', config / 'modpack.toml')
         (config / 'plugins.toml').write_text('schema_version=1\ndiscover=false\nplugins=[]\n', encoding='utf-8')
         subprocess.run([sys.executable, __file__, '--child', str(folder)], cwd=folder, check=True)
+
+        plugins=config/'plugins';plugins.mkdir(exist_ok=True)
+        shutil.copy2(ROOT/'target/release/rekenshi_source_transform.dll',plugins)
+        settings=config/'settings';settings.mkdir(exist_ok=True)
+        (settings/'source-transform.toml').write_text('schema_version=1\n[settings.values]\n"source_transform.enabled"=true\n"runtime_policy.enabled"=true\n')
+        (config/'plugins.toml').write_text('schema_version=1\ndiscover=true\n')
+        subprocess.run([sys.executable,__file__,'--child',str(folder),'public'],cwd=folder,check=True)

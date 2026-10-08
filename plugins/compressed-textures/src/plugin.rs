@@ -3,8 +3,10 @@
 use crate::native;
 pub use native::{decoded, sidecar_hits};
 use rekenshi_plugin_runtime::{Context, Control, Plugin, Setting, Settings, Value};
-#[derive(Debug)]
-pub struct CompressedTextures;
+#[derive(Debug, Default)]
+pub struct CompressedTextures {
+    policy: rekenshi_plugin_sdk::policies::DesiredPolicy,
+}
 const SETTINGS: &[Setting] = &[Setting {
     key: "performance.compressed_textures",
     label: "Enabled",
@@ -22,7 +24,19 @@ impl Plugin for CompressedTextures {
     fn settings(&self) -> &'static [Setting] {
         SETTINGS
     }
-    fn start(
+    fn register(
+        &mut self,
+        context: &Context,
+        settings: &Settings,
+    ) -> Result<(), rekenshi_plugin_runtime::Error> {
+        self.policy.set(
+            context.host.native(),
+            rekenshi_plugin_sdk::policies::TEXTURES,
+            "rekenshi.builtin.compressed-textures@1",
+            (settings.enabled(SETTINGS[0].key)).then_some([1., 0., 0., 0.]),
+        )
+    }
+    fn install(
         &mut self,
         context: &Context,
         settings: &Settings,
@@ -31,17 +45,18 @@ impl Plugin for CompressedTextures {
             context.host.native(),
             context.root.parent().ok_or("game directory")?,
         )?;
-        self.update(context, settings)
+        self.settings_changed(context, settings)
     }
-    fn update(
+    fn settings_changed(
         &mut self,
-        _: &Context,
+        context: &Context,
         settings: &Settings,
     ) -> Result<(), rekenshi_plugin_runtime::Error> {
-        native::set_enabled(settings.enabled(SETTINGS[0].key));
-        Ok(())
+        self.register(context, settings)
     }
+
     fn stop(&mut self) -> Result<(), rekenshi_plugin_runtime::Error> {
+        self.policy.remove()?;
         native::stop().map_err(rekenshi_plugin_runtime::Error::from)
     }
 }

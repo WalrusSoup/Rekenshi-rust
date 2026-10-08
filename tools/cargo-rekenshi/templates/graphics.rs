@@ -10,8 +10,8 @@ impl Plugin for MyMod {
         key:"__ID__.enabled", label:"Enabled", description:"Apply the world shader.",
         default:Value::Toggle(true), control:Control::Toggle,
     }] }
-    fn start(&mut self,context:&Context,settings:&Settings)->Result<(),rekenshi_plugin_sdk::Error> { self.update(context,settings) }
-    fn update(&mut self,context:&Context,settings:&Settings)->Result<(),rekenshi_plugin_sdk::Error> {
+    fn install(&mut self,context:&Context,settings:&Settings)->Result<(),rekenshi_plugin_sdk::Error> { self.settings_changed(context,settings) }
+    fn settings_changed(&mut self,context:&Context,settings:&Settings)->Result<(),rekenshi_plugin_sdk::Error> {
         if !settings.enabled("__ID__.enabled") { return self.stop(); }
         let parameters=[1.,1.,1.,1.,0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,0.];
         match self.effect.as_mut() {

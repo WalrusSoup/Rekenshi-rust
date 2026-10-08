@@ -23,7 +23,7 @@ pub(crate) fn available(id: &str) -> bool {
         .is_ok_and(|p| p.as_ref().is_some_and(|r| r.available(id)))
 }
 
-pub(crate) fn start() -> Result<(), String> {
+pub(crate) fn prepare() -> Result<(), String> {
     let root = logging::directory()
         .ok_or("host folder")?
         .join("RE_Kenshi_Rust");
@@ -40,18 +40,28 @@ pub(crate) fn start() -> Result<(), String> {
     }
     crate::sample_config::migrate_settings(&root)?;
     let registry = Plugins::new()
-        .register(ShaderCache)
-        .register(HeightmapCache)
-        .register(ColliderCache)
-        .register(DdsMipSkip)
-        .register(CompressedTextures)
-        .register(GraphicsBackend)
-        .register(rekenshi_dark_ui::DarkUi)
-        .register(rekenshi_weather::Weather::new(extensions::allowed));
-    *plugins = Some(registry.start(root, |id, token| {
+        .register(ShaderCache::default())
+        .register(HeightmapCache::default())
+        .register(ColliderCache::default())
+        .register(DdsMipSkip::default())
+        .register(CompressedTextures::default())
+        .register(GraphicsBackend::default())
+        .register(rekenshi_dark_ui::DarkUi::default())
+        .register(rekenshi_weather::Weather::default())
+        .register(crate::diagnostics::Diagnostics);
+    *plugins = Some(registry.prepare(root, |id, token| {
         extensions::internal_host(id, token).map_err(Into::into)
     })?);
     logging::write("internal plugins mounted; settings apply without restart");
+    Ok(())
+}
+pub(crate) fn start() -> Result<(), String> {
+    let mut plugins = PLUGINS
+        .lock()
+        .map_err(|_| "internal plugin registry lock poisoned")?;
+    if let Some(runtime) = plugins.as_mut() {
+        runtime.install().map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 pub(crate) fn active_count() -> usize {
@@ -87,4 +97,11 @@ pub(crate) fn stop() -> Result<(), String> {
     }
     *plugins = None;
     Ok(())
+}
+pub(crate) fn dispatch_lifecycle() {
+    if let Ok(mut plugins) = PLUGINS.try_lock() {
+        if let Some(runtime) = plugins.as_mut() {
+            let _ = runtime.dispatch_lifecycle();
+        }
+    }
 }

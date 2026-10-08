@@ -5,13 +5,16 @@ use rekenshi_plugin_sdk::gameplay::{
 };
 use rekenshi_plugin_sdk::{Context, Plugin, Settings};
 use serde_json::{Value, json};
-use std::sync::mpsc::{self, Sender};
+use std::sync::{
+    Arc, Mutex,
+    mpsc::{self, SyncSender},
+};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
 
 #[derive(Default, Debug)]
 pub struct SquadInspector {
-    stop: Option<Sender<()>>,
+    output: Option<SyncSender<()>>,
+    latest: Arc<Mutex<Option<Value>>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -23,50 +26,47 @@ impl Plugin for SquadInspector {
         "Live squad inspector"
     }
 
-    fn start(&mut self, context: &Context, _: &Settings) -> Result<(), rekenshi_plugin_sdk::Error> {
+    fn install(
+        &mut self,
+        context: &Context,
+        _: &Settings,
+    ) -> Result<(), rekenshi_plugin_sdk::Error> {
         let gameplay = Gameplay::connect(context);
         let path = context.root.join("squad-inspector.json");
         let logger = context.host.logger();
-        let (stop, receiver) = mpsc::channel();
+        let (stop, receiver) = mpsc::sync_channel(1);
+        let latest = Arc::clone(&self.latest);
         let worker = thread::Builder::new()
             .name("squad-inspector".into())
             .spawn(move || {
                 let mut previous = None;
-                let mut last_write = None::<Instant>;
-                let mut last_error = None::<Instant>;
-                loop {
-                    let current = document(&gameplay);
-                    let due =
-                        last_write.is_none_or(|time| time.elapsed() >= Duration::from_secs(1));
-                    if due && previous.as_ref() != Some(&current) {
-                        let written = serde_json::to_vec_pretty(&current)
-                            .map_err(std::io::Error::other)
-                            .and_then(|bytes| std::fs::write(&path, bytes));
-                        last_write = Some(Instant::now());
-                        match written {
-                            Ok(()) => previous = Some(current),
-                            Err(error)
-                                if last_error.is_none_or(|time| {
-                                    time.elapsed() >= Duration::from_secs(30)
-                                }) =>
-                            {
-                                logger.log(&format!(
-                                    "squad inspector could not write {}: {error}",
-                                    path.display()
-                                ));
-                                last_error = Some(Instant::now());
-                            }
-                            Err(_) => {}
-                        }
+                while receiver.recv().is_ok() {
+                    let Ok(mut pending) = latest.lock() else {
+                        break;
+                    };
+                    let Some(current) = pending.take() else {
+                        continue;
+                    };
+                    drop(pending);
+                    if previous.as_ref() == Some(&current) {
+                        continue;
                     }
-                    match receiver.recv_timeout(Duration::from_millis(250)) {
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        _ => break,
+                    match serde_json::to_vec_pretty(&current)
+                        .map_err(std::io::Error::other)
+                        .and_then(|bytes| std::fs::write(&path, bytes))
+                    {
+                        Ok(()) => previous = Some(current),
+                        Err(error) => logger.log(&format!("squad inspector write failed: {error}")),
                     }
                 }
             })
             .map_err(|error| format!("start squad inspector: {error}"))?;
-        self.stop = Some(stop);
+        *self
+            .latest
+            .lock()
+            .map_err(|_| "inspector output poisoned")? = Some(document(&gameplay));
+        let _ = stop.try_send(());
+        self.output = Some(stop);
         self.worker = Some(worker);
         context.log(&format!(
             "live squad inspector writes {}",
@@ -75,10 +75,27 @@ impl Plugin for SquadInspector {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), rekenshi_plugin_sdk::Error> {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
+    fn event_contracts(&self) -> &'static [&'static str] {
+        &[rekenshi_plugin_sdk::events::ROSTER_CHANGED]
+    }
+    fn event(
+        &mut self,
+        context: &Context,
+        _: &str,
+        _: &rekenshi_plugin_sdk::events::EventV1,
+    ) -> Result<(), rekenshi_plugin_sdk::Error> {
+        if let Some(output) = &self.output {
+            *self
+                .latest
+                .lock()
+                .map_err(|_| "inspector output poisoned")? =
+                Some(document(&Gameplay::connect(context)));
+            let _ = output.try_send(());
         }
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), rekenshi_plugin_sdk::Error> {
+        self.output = None;
         if let Some(worker) = self.worker.take() {
             worker
                 .join()

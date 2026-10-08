@@ -47,7 +47,7 @@ impl Plugin for RainRefinement {
     fn settings(&self) -> &'static [Setting] {
         SETTINGS
     }
-    fn start(
+    fn register(
         &mut self,
         context: &Context,
         settings: &Settings,
@@ -56,9 +56,9 @@ impl Plugin for RainRefinement {
         context
             .host
             .log("rain-refinement: native streak geometry via shared weather renderer");
-        self.update(context, settings)
+        self.settings_changed(context, settings)
     }
-    fn update(
+    fn settings_changed(
         &mut self,
         _: &Context,
         settings: &Settings,

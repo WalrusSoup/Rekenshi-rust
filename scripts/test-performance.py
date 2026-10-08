@@ -93,8 +93,8 @@ def child(folder,game):
         expected[level]=read(source); release(C.byref(source))
     print('Native DDS baseline captured',flush=True)
     host.dllStartPlugin()
-    assert host.rekenshi_pack_layers()==8,(host.rekenshi_pack_layers(),(folder/'RE_Kenshi_Rust.log').read_text())
-    assert host.rekenshi_internal_plugins()==8
+    assert host.rekenshi_pack_layers()==9,(host.rekenshi_pack_layers(),(folder/'RE_Kenshi_Rust.log').read_text())
+    assert host.rekenshi_internal_plugins()==9
     setting('performance.dds_mip_skip',True)
     for level in range(5):
         quality.value=level;source=stream('sample_HI.dds');before=host.rekenshi_dds_skipped_bytes()
@@ -181,11 +181,81 @@ def child(folder,game):
     collection=load(C.byref(String('sample.bin')),0);assert collection;destroy(collection)
     assert host.rekenshi_collider_cache_hits()==before+2
     host.dllStopPlugin();assert host.rekenshi_pack_layers()==0
-    host.dllStartPlugin();assert host.rekenshi_pack_layers()==8;host.dllStopPlugin()
+    host.dllStartPlugin();assert host.rekenshi_pack_layers()==9;host.dllStopPlugin()
     physics.NxReleasePhysicsSDK.argtypes=[C.c_void_p];physics.NxReleasePhysicsSDK(sdk)
     function(ogre,'??1FileSystemArchive@Ogre@@UEAA@XZ',None,[C.c_void_p])(archive)
     function(ogre,'??1Root@Ogre@@QEAA@XZ',None,[C.c_void_p])(root)
     print('PASS: real PhysX collider clones, independent mutation, native releases, bypass and pack restart',flush=True)
+def public_child(folder,game):
+    os.chdir(folder); search=os.add_dll_directory(str(game))
+    base,imports=mapped_exe(folder,game)
+    ogre=C.WinDLL(str(folder/'OgreMain_x64.dll'))
+    gui=C.WinDLL(str(folder/'MyGUIEngine_x64.dll'))
+    host=C.CDLL(str(folder/'RE_Kenshi_Rust.dll'))
+    for name in ['rekenshi_dds_skipped_bytes','rekenshi_collider_cache_hits','rekenshi_sic_decoded','rekenshi_texture_sidecar_hits']:
+        getattr(host,name).restype=C.c_uint64
+    host.rekenshi_pack_setting_set.argtypes=[C.c_char_p,C.c_size_t,C.c_uint32,C.c_double]
+    def setting(key,value):
+        key=key.encode(); assert host.rekenshi_pack_setting_set(key,len(key),1,float(value))==0,key
+    print('Mapped executable imports; constructing headless Ogre root',flush=True)
+    root=C.create_string_buffer(4096); empty=String(b''); log=String('native-performance.log')
+    function(ogre,'??0Root@Ogre@@',C.c_void_p,[C.c_void_p,C.POINTER(String),C.POINTER(String),C.POINTER(String)])(root,C.byref(empty),C.byref(empty),C.byref(log))
+    manager=function(ogre,'?getSingletonPtr@ResourceGroupManager@',C.c_void_p,[])()
+    location=String(str(folder));kind=String('FileSystem');group=String('General')
+    function(ogre,'?addResourceLocation@ResourceGroupManager@',None,[C.c_void_p,C.POINTER(String),C.POINTER(String),C.POINTER(String),C.c_bool,C.c_bool])(manager,C.byref(location),C.byref(kind),C.byref(group),False,True)
+    archive=C.create_string_buffer(256)
+    function(ogre,'??0FileSystemArchive@Ogre@@',C.c_void_p,[C.c_void_p,C.POINTER(String),C.POINTER(String),C.c_bool])(archive,C.byref(location),C.byref(kind),True)
+    opener=function(ogre,'?open@FileSystemArchive@Ogre@@',C.c_void_p,[C.c_void_p,C.POINTER(Shared),C.POINTER(String),C.c_bool])
+    release=function(ogre,'??1?$SharedPtr@VHardwareCounterBuffer@Ogre@@',None,[C.POINTER(Shared)])
+    def stream(name):
+        output=Shared(); opener(archive,C.byref(output),C.byref(String(name)),True); assert output.object;return output
+    def read(value):
+        size=C.c_size_t.from_address(value.object+0x30).value;output=C.create_string_buffer(size)
+        virtual(value.object,10,None,[C.c_size_t])(value.object,0)
+        assert virtual(value.object,3,C.c_size_t,[C.c_void_p,C.c_size_t])(value.object,output,size)==size
+        return output.raw
+    opened=CALL(None,C.c_void_p,C.POINTER(String),C.POINTER(String),C.c_void_p,C.POINTER(Shared))(base+0x82ddc0)
+    quality=C.c_int32.from_address(base+0x213352c)
+    quality.value=2; baseline=stream('sample_HI.dds')
+    opened(None,C.byref(String('sample_HI.dds')),C.byref(group),None,C.byref(baseline))
+    expected=read(baseline); release(C.byref(baseline))
+    host.dllStartPlugin()
+    assert host.rekenshi_pack_layers()==9 and host.rekenshi_plugins_loaded()==1, (folder/'RE_Kenshi_Rust.log').read_text()
+    quality.value=0; source=stream('sample_HI.dds')
+    opened(None,C.byref(String('sample_HI.dds')),C.byref(group),None,C.byref(source))
+    assert read(source)==expected, 'independent mip rule must override built-in-off/native quality zero'
+    release(C.byref(source))
+    terrain=C.CDLL(str(folder/'Plugin_Terrain_x64.dll'))
+    open_tiff=CALL(C.c_void_p,C.c_char_p,C.c_int)(terrain._handle+0x20880)
+    read_pixel=CALL(C.c_size_t,C.c_void_p,C.c_int,C.c_int,C.c_void_p)(terrain._handle+0x21640)
+    close=CALL(C.c_void_p,C.c_void_p,C.c_uint32)(terrain._handle+0x143f0)
+    reader=open_tiff(str(folder/'data/newland/land/redirect.tif').encode(),1); assert reader
+    pixel=C.c_uint16(); assert read_pixel(reader,17,23,C.byref(pixel))==1 and pixel.value==23*64+17+7
+    codec=function(ogre,'?getCodec@Codec@Ogre@@SAPEAV12@AEBV',C.c_void_p,[C.POINTER(String)])(C.byref(String('rki')));assert codec
+    (folder/'example.rki').write_bytes(b'RKI'+bytes([11,22,33,44]))
+    source=stream('example.rki'); result=Result()
+    virtual(codec,3,C.c_void_p,[C.POINTER(Result),C.POINTER(Shared)])(codec,C.byref(result),C.byref(source))
+    assert read(result.pixels)==bytes([11,22,33,44])
+    for value in [result.pixels,result.metadata,source]:release(C.byref(value))
+    physics=C.WinDLL(str(folder/'PhysXLoader64.dll'))
+    physics.NxCreatePhysicsSDK.argtypes=[C.c_uint32,C.c_void_p,C.c_void_p,C.c_void_p,C.c_void_p,C.c_char_p];physics.NxCreatePhysicsSDK.restype=C.c_void_p
+    desc=(C.c_uint32*8)(65536,256,2048,0,3,32,0xffffffff,0)
+    sdk=physics.NxCreatePhysicsSDK(0x02080400,None,None,C.byref(desc),None,b'BE9042F0-ADC4-4b12-A93E-DB8A731FDBD5'); assert sdk
+    load=CALL(C.c_void_p,C.POINTER(String),C.c_int32)(base+0x7e53f0); destroy=CALL(None,C.c_void_p)(base+0x1d99f0)
+    first=load(C.byref(String('sample.bin')),0); assert first
+    before=host.rekenshi_collider_cache_hits();second=load(C.byref(String('sample.bin')),0); assert second and second!=first
+    assert host.rekenshi_collider_cache_hits()==before+1, 'independent collider rule owns caching while built-in is off'
+    for value in [first,second]:destroy(value)
+    host.dllStopPlugin()
+    assert read_pixel(reader,17,23,C.byref(pixel))==1 and pixel.value==23*64+17, 'owned read interception survived shutdown'
+    close(reader,1)
+    registered=function(ogre,'?isCodecRegistered@Codec@Ogre@@',C.c_bool,[C.POINTER(String)])
+    assert not registered(C.byref(String('rki'))), 'native custom codec slot survived shutdown'
+    physics.NxReleasePhysicsSDK.argtypes=[C.c_void_p];physics.NxReleasePhysicsSDK(sdk)
+    function(ogre,'??1FileSystemArchive@Ogre@@UEAA@XZ',None,[C.c_void_p])(archive)
+    function(ogre,'??1Root@Ogre@@QEAA@XZ',None,[C.c_void_p])(root)
+    print('PASS: independent DLL controls native terrain, DDS, collider and custom codec; native allocation/release and shutdown cleanup',flush=True)
+
 def stage(game):
     folder=ROOT/'target/performance-tests'/uuid.uuid4().hex;folder.mkdir(parents=True)
     for name in ['RE_Kenshi_Rust.dll','pack-config.exe','texture-pack.exe']:
@@ -210,7 +280,15 @@ def stage(game):
     return folder
 if __name__=='__main__':
     if sys.argv[1]=='--child':child(pathlib.Path(sys.argv[2]),pathlib.Path(sys.argv[3]))
+    elif sys.argv[1]=='--public-child':public_child(pathlib.Path(sys.argv[2]),pathlib.Path(sys.argv[3]))
     else:
         game=pathlib.Path(sys.argv[1]);folder=stage(game)
         print('Staged:',folder,flush=True)
         subprocess.run([sys.executable,__file__,'--child',str(folder),str(game)],check=True)
+        folder=stage(game)
+        plugins=folder/'RE_Kenshi_Rust/plugins'; plugins.mkdir(exist_ok=True)
+        shutil.copy2(ROOT/'target/release/rekenshi_source_transform.dll',plugins)
+        settings=plugins.parent/'settings';settings.mkdir(exist_ok=True)
+        (settings/'source-transform.toml').write_text('schema_version=1\n[settings.values]\n"source_transform.enabled"=true\n"runtime_policy.enabled"=true\n')
+        (plugins.parent/'plugins.toml').write_text('schema_version=1\ndiscover=true\n')
+        subprocess.run([sys.executable,__file__,'--public-child',str(folder),str(game)],check=True)

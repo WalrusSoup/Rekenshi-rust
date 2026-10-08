@@ -1,12 +1,14 @@
 //! Shader caching policy; all native compiler operations live in the adapter.
 #![forbid(unsafe_code)]
 use crate::native;
-use rekenshi_plugin_api::{HostV1, OK};
+use rekenshi_plugin_api::OK;
 use rekenshi_plugin_runtime::{Context, Control, Plugin, Setting, Settings, Value};
 use std::path::Path;
 
-#[derive(Debug)]
-pub struct ShaderCache;
+#[derive(Debug, Default)]
+pub struct ShaderCache {
+    policy: rekenshi_plugin_sdk::policies::DesiredPolicy,
+}
 const SETTINGS: &[Setting] = &[Setting {
     key: "performance.shader_cache",
     label: "Enabled",
@@ -24,7 +26,19 @@ impl Plugin for ShaderCache {
     fn settings(&self) -> &'static [Setting] {
         SETTINGS
     }
-    fn start(
+    fn register(
+        &mut self,
+        context: &Context,
+        settings: &Settings,
+    ) -> Result<(), rekenshi_plugin_runtime::Error> {
+        self.policy.set(
+            context.host.native(),
+            rekenshi_plugin_sdk::policies::SHADER_CACHE,
+            "rekenshi.builtin.shader-cache@1",
+            (settings.enabled(SETTINGS[0].key)).then_some([1., 0., 0., 0.]),
+        )
+    }
+    fn install(
         &mut self,
         context: &Context,
         settings: &Settings,
@@ -32,23 +46,20 @@ impl Plugin for ShaderCache {
         let mut config: native::Settings = rekenshi_native::settings(&config_path(&context.root))?;
         config.shader_cache = true;
         native::initialize(context.host.native(), &context.root, config)?;
-        self.update(context, settings)
+        self.settings_changed(context, settings)
     }
-    fn update(
+    fn settings_changed(
         &mut self,
-        _: &Context,
+        context: &Context,
         settings: &Settings,
     ) -> Result<(), rekenshi_plugin_runtime::Error> {
-        native::set_enabled(settings.enabled(SETTINGS[0].key));
-        Ok(())
+        self.register(context, settings)
     }
+
     fn stop(&mut self) -> Result<(), rekenshi_plugin_runtime::Error> {
+        self.policy.remove()?;
         stop()
     }
-}
-pub fn start_legacy(host: HostV1, root: &Path) -> Result<(), rekenshi_plugin_runtime::Error> {
-    native::initialize(host, root, rekenshi_native::settings(&config_path(root))?)
-        .map_err(rekenshi_plugin_runtime::Error::from)
 }
 pub fn stop() -> Result<(), rekenshi_plugin_runtime::Error> {
     if native::stop() == OK {

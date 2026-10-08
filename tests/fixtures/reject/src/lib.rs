@@ -39,3 +39,19 @@ unsafe extern "C" fn stop() -> i32 {
     }
     OK
 }
+
+/// Prepare this scalar-only ABI fixture; it owns no desired operation registrations.
+/// # Safety
+/// Host provides a stable negotiated table.
+// SAFETY: Unique preparation export implementing the host's current C contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rekenshi_plugin_prepare(
+    version: u32,
+    _: *const rekenshi_plugin_api::HostV1,
+) -> i32 {
+    if version == 1 {
+        rekenshi_plugin_api::OK
+    } else {
+        rekenshi_plugin_api::INCOMPATIBLE
+    }
+}

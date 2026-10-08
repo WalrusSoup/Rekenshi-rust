@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 rekenshi-plugin-api = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+sha2.workspace = true
 toml = { workspace = true }
 
 [dev-dependencies]

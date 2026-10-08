@@ -38,6 +38,7 @@ members = [
     "tests/fixtures/reject",
     "tests/fixtures/lifecycle",
     "tests/fixtures/gameplay-probe",
+    "samples/source-transform",
 ]
 default-members = [".", "samples/kenshi2-style"]
 
@@ -48,6 +49,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+rekenshi-source-transform = { version = "0.1.0", path = "samples/source-transform" }
 cargo-rekenshi = { version = "0.1.0", path = "tools/cargo-rekenshi" }
 fixture-incompatible = { version = "0.1.0", path = "tests/fixtures/incompatible" }
 fixture-lifecycle = { version = "0.1.0", path = "tests/fixtures/lifecycle" }
@@ -129,6 +131,7 @@ rekenshi-heightmap-cache = { workspace = true }
 rekenshi-native = { workspace = true }
 rekenshi-plugin-api = { workspace = true }
 rekenshi-plugin-runtime = { workspace = true }
+rekenshi-plugin-sdk.workspace = true
 rekenshi-shader-cache = { workspace = true }
 rekenshi-sic = { workspace = true }
 rekenshi-weather.workspace = true

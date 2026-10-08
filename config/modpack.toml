@@ -9,3 +9,5 @@ schema_version = 1
 "ui.dark_mode" = true
 "ui.panel_brightness" = 0.6
 "weather.tone_down" = true
+"debug.overlay" = false
+"debug.freeze" = false

@@ -7,6 +7,29 @@ mapping of `data/newland/land/fullmap.tif`, without a converted asset or a secon
 on-disk cache. Windows loads pages as they are accessed; the implementation does
 not preload the entire 512 MiB image.
 
+## Gigacache
+
+**Options → REKENSHI-RUST → Heightmap cache → Gigacache** enables
+`performance.heightmap_gigacache` (default false). It copies the complete
+uncompressed `fullmap.tif` into an owned buffer before switching reads to it.
+The installed file requires about 512 MiB of additional committed memory;
+Windows may also retain mapped file pages in its cache and can page out the
+owned buffer under memory pressure. This is eager loading, not locked physical RAM.
+
+Gigacache works independently of **Mapped cache**. With both on, Gigacache takes
+priority. Turning it off releases the copy after in-flight reads finish and
+returns to mapped reads if Mapped cache is on, or native reads otherwise.
+Enabling performs synchronous loading and may pause the menu/game; enable it
+before traveling. Saved settings preload on plugin startup. Repeated setting
+updates reuse the existing copy. Shutdown releases it.
+
+Allocation is fallible and files over 1 GiB are rejected. Preparation failure
+leaves the previous read mode intact. The copy is prepared outside the reader
+registry lock, so existing native reads can continue during loading. The same
+file mapping and write/delete sharing restrictions remain alive with each copy.
+No texture, navigation, or live zone state is preloaded. No gameplay performance
+gain is claimed without a travel benchmark.
+
 The safe plugin module owns policy. Its private adapter hooks the installed
 terrain DLL's TIFF reader beneath `Terrain::getHeight` and `getRawData`.
 Consequently, the native code still handles world coordinates, height scaling,
@@ -54,6 +77,8 @@ to release its own native allocation. No constructor/destructor is substituted.
 The ignored native test uses the actual installed 16,385 × 16,385 TIFF and DLL:
 1,024 scattered pixel results, whole rectangles and clipped edge rectangles are
 compared to original trampolines, including return counts and untouched output.
+The comparison runs in both mapped and Gigacache modes. It also verifies reuse,
+switching modes with an in-flight owner, copy release, and eager shutdown.
 It checks disable, reader close, hook shutdown and restart. The staged host suite
 also checks live toggles, a different TIFF with matching dimensions, persisted
 settings and startup with unavailable feature slots.

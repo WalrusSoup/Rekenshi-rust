@@ -4,10 +4,12 @@
 
 mod callbacks;
 mod catalog;
+mod diagnostics;
 mod extensions;
 mod gameplay;
 mod internal_plugins;
 mod logging;
+mod platform;
 mod plugin;
 mod sample_config;
 mod services;

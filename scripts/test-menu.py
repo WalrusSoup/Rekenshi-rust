@@ -5,11 +5,16 @@ import shutil
 import subprocess
 import sys
 import uuid
+import xml.etree.ElementTree as E
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 def resources():
-    return (ROOT / 'tests/fixtures/menu-resources.xml').read_bytes()
+    root = E.parse(ROOT / 'tests/fixtures/menu-resources.xml').getroot()
+    skin = next(r for r in root if r.get('name') == 'Kenshi_TextBoxEmptySkin')
+    basis = E.SubElement(skin, 'BasisSkin', type='SimpleText', offset='0 0 100 30', align='Stretch')
+    E.SubElement(basis, 'State', name='normal', colour='1 1 1')
+    return E.tostring(root)
 
 def child(folder):
     ogre = C.CDLL(str(folder / 'OgreMain_x64.dll'))
@@ -30,6 +35,12 @@ def child(folder):
         getattr(native, name).argtypes = [C.c_void_p]
     native.menu_visible.restype = native.menu_checked.restype = C.c_bool
     native.menu_needs_mouse.restype = native.menu_inherits_pick.restype = C.c_bool
+    native.menu_caption.argtypes = [C.c_void_p]
+    native.menu_caption.restype = C.c_char_p
+    host.rekenshi_plugin_setting_set.argtypes = [C.c_void_p, C.c_size_t, C.c_uint32, C.c_double]
+    def setting(key, value):
+        key = key.encode()
+        assert host.rekenshi_plugin_setting_set(key, len(key), 1, float(value)) == 0
     native.menu_count.restype = C.c_size_t
     native.menu_setup(resources())
     host.dllStartPlugin()
@@ -107,9 +118,50 @@ def child(folder):
     assert panel and native.menu_parent(panel) == tab
     native.menu_select(2); native.menu_frame()
     assert native.menu_visible(panel)
+    # Enable through the real paginated Options checkbox, rather than bypassing it.
+    assert not native.menu_find(b'RKDebug.overlay'), 'debug overlay is opt-in'
+    toggle = None
+    for _ in range(16):
+        for index in range(64):
+            label = native.menu_find(('RKPack.label.' + str(index)).encode())
+            if label and native.menu_visible(label) and native.menu_caption(label).endswith(b' / Debug overlay'):
+                toggle = native.menu_find(('RKPack.toggle.' + str(index)).encode())
+                break
+        if toggle: break
+        native.menu_click(native.menu_find(b'RKPack.next')); native.menu_frame()
+    assert toggle, 'developer diagnostics must be reachable from Options'
+    native.menu_click(toggle); native.menu_frame()
+    overlay = native.menu_find(b'RKDebug.overlay')
+    body = native.menu_find(b'RKDebug.text')
+    assert overlay and body and not native.menu_parent(overlay), 'independent root survives Options closure'
+    assert not native.menu_needs_mouse(overlay) and not native.menu_needs_mouse(body)
+    assert not native.menu_inherits_pick(overlay), 'overlay cannot capture HUD input'
+    caption = native.menu_caption(body)
+    assert b'Developer diagnostics' in caption and b'debug.overlay applied' in caption
+    assert b'Contracts:' in caption and b'calls' in caption
+    native.menu_hide(True); native.menu_frame()
+    assert native.menu_visible(overlay), 'closing Options must leave the debug stream visible'
+    setting('debug.freeze', True); native.menu_frame()
+    frozen = native.menu_caption(body)
+    native.menu_hide(False); native.menu_rebuild(); native.menu_frame()
+    assert native.menu_caption(body) == frozen, 'freeze holds the displayed snapshot'
+    setting('debug.freeze', False); native.menu_frame()
+    assert native.menu_caption(body) != frozen and b'REKENSHI-RUST tab added' in native.menu_caption(body), 'unfreeze includes intervening diagnostics'
+    native.theme_destroy.argtypes = [C.c_void_p]
+    native.theme_destroy(overlay); native.menu_frame()
+    assert native.menu_find(b'RKDebug.text'), 'native widget destruction permits safe recreation'
+    setting('debug.overlay', False); native.menu_frame()
+    assert not native.menu_find(b'RKDebug.overlay'), 'disable destroys the owned root'
+    setting('debug.overlay', True); native.menu_frame()
+    saved = (folder / 'RE_Kenshi_Rust/modpack.toml').read_text()
+    assert '"debug.overlay" = true' in saved, 'toggle persists with the other settings'
+    host.dllStopPlugin()
+    assert not native.menu_find(b'RKDebug.overlay'), 'UI-lane shutdown retires the overlay'
+    host.dllStartPlugin(); native.menu_frame()
+    assert native.menu_find(b'RKDebug.overlay'), 'restart restores the saved toggle'
     host.dllStopPlugin()
     native.menu_shutdown()
-    print('PASS: native Options tab, typed close data, hide/reopen, close/recreate, tab switching, checkbox events, pagination, resize and GUI rebuild')
+    print('PASS: native Options lifecycle and toggleable debug overlay, copied logs, freeze, click-through, recreation, persistence and shutdown')
 
 if __name__ == '__main__':
     if sys.argv[1] == '--child':

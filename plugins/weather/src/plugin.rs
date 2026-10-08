@@ -2,19 +2,10 @@
 #![forbid(unsafe_code)]
 use crate::native;
 use rekenshi_plugin_runtime::{Context, Control, Plugin, Setting, Settings, Value};
-/// Built-in weather policy and shared renderer with host-owned token authorization.
-#[derive(Debug)]
+/// Built-in weather policy over the public particle appearance contract.
+#[derive(Debug, Default)]
 pub struct Weather {
-    allowed: fn(u64) -> bool,
-}
-impl Weather {
-    /// Construct the weather plugin with the host's live token authorization check.
-    ///
-    /// The check must return false once an independent plugin's token is revoked.
-    /// The host calls release after revocation to remove that plugin's rain style.
-    pub const fn new(allowed: fn(u64) -> bool) -> Self {
-        Self { allowed }
-    }
+    policy: rekenshi_plugin_sdk::policies::DesiredPolicy,
 }
 const SETTING: Setting = Setting {
     key: "weather.tone_down",
@@ -33,7 +24,7 @@ impl Plugin for Weather {
     fn settings(&self) -> &'static [Setting] {
         std::slice::from_ref(&SETTING)
     }
-    fn start(
+    fn install(
         &mut self,
         context: &Context,
         settings: &Settings,
@@ -41,19 +32,33 @@ impl Plugin for Weather {
         native::start(
             context.host.native(),
             context.root.parent().ok_or("game directory")?,
-            self.allowed,
         )?;
-        self.update(context, settings)
+        self.settings_changed(context, settings)
     }
-    fn update(
+    fn register(
         &mut self,
-        _: &Context,
+        context: &Context,
         settings: &Settings,
     ) -> Result<(), rekenshi_plugin_runtime::Error> {
-        native::configure(settings.enabled(SETTING.key));
+        self.settings_changed(context, settings)
+    }
+    fn settings_changed(
+        &mut self,
+        context: &Context,
+        settings: &Settings,
+    ) -> Result<(), rekenshi_plugin_runtime::Error> {
+        self.policy.set(
+            context.host.native(),
+            rekenshi_plugin_sdk::policies::WEATHER,
+            "rekenshi.builtin.weather@1",
+            settings
+                .enabled(SETTING.key)
+                .then_some([0.35, 0.35, 0., 0.]),
+        )?;
         Ok(())
     }
     fn stop(&mut self) -> Result<(), rekenshi_plugin_runtime::Error> {
+        self.policy.remove()?;
         native::stop().map_err(rekenshi_plugin_runtime::Error::from)
     }
 }

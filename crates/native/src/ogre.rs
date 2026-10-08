@@ -352,6 +352,35 @@ pub struct NativeString {
     capacity: usize,
 }
 impl NativeString {
+    /// Borrow bytes in the verified VC100 string representation for a const native
+    /// call. The record has no native destructor and must never be mutated or retained.
+    pub fn borrowed(text: &[u8]) -> BorrowedString<'_> {
+        let mut value = if text.len() < 16 {
+            Self::short(text)
+        } else {
+            Self {
+                storage: [0; 16],
+                length: text.len(),
+                capacity: text.len(),
+            }
+        };
+        if text.len() >= 16 {
+            let pointer = text.as_ptr();
+            // SAFETY: Copy one pointer's representation into native long-string
+            // storage; preserve provenance, with the slice lifetime carried below.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    std::ptr::from_ref(&pointer).cast::<u8>(),
+                    value.storage.as_mut_ptr(),
+                    size_of::<*const u8>(),
+                );
+            }
+        }
+        BorrowedString {
+            value,
+            lifetime: std::marker::PhantomData,
+        }
+    }
     pub fn short(text: &[u8]) -> Self {
         assert!(
             text.len() < 16,
@@ -365,6 +394,18 @@ impl NativeString {
             length: text.len(),
             capacity: 15,
         }
+    }
+}
+/// Borrowed const native string; only verified read-only calls may consume its pointer.
+#[derive(Debug)]
+pub struct BorrowedString<'a> {
+    value: NativeString,
+    lifetime: std::marker::PhantomData<&'a [u8]>,
+}
+impl BorrowedString<'_> {
+    /// Pointer valid while this record and its backing slice remain borrowed.
+    pub fn as_ptr(&self) -> *const c_void {
+        std::ptr::from_ref(&self.value).cast()
     }
 }
 /// Copy a string from the verified engine's VC100 representation.

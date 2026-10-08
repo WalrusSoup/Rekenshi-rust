@@ -1,4 +1,4 @@
-use std::ffi::c_void;
+use std::ffi::{CStr, c_void};
 use std::path::Path;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 
@@ -16,6 +16,19 @@ type Compile = unsafe extern "system" fn(
     *mut Option<ID3DBlob>,
 ) -> i32;
 pub fn compile(game: &Path, source: &[u8], vertex: bool) -> Result<Vec<u8>, String> {
+    compile_flags(
+        game,
+        source,
+        if vertex { c"vs_5_0" } else { c"ps_5_0" },
+        1 << 15,
+    )
+}
+#[cfg(test)]
+pub(super) fn compile_legacy(game: &Path, source: &[u8], target: &CStr) -> Result<Vec<u8>, String> {
+    // Kenshi's Ogre shaders use legacy sampler intrinsics under D3D11.
+    compile_flags(game, source, target, (1 << 15) | (1 << 12))
+}
+fn compile_flags(game: &Path, source: &[u8], target: &CStr, flags: u32) -> Result<Vec<u8>, String> {
     let module = rekenshi_native::load_pinned(&game.join("D3DCompiler_43.dll"))?;
     // SAFETY: Documented compiler export signature; DLL pinned for process life.
     let compile: Compile =
@@ -32,12 +45,8 @@ pub fn compile(game: &Path, source: &[u8], vertex: bool) -> Result<Vec<u8>, Stri
             std::ptr::null(),
             std::ptr::null_mut(),
             c"main".as_ptr(),
-            if vertex {
-                c"vs_5_0".as_ptr()
-            } else {
-                c"ps_5_0".as_ptr()
-            },
-            1 << 15,
+            target.as_ptr(),
+            flags,
             0,
             &mut code,
             &mut errors,

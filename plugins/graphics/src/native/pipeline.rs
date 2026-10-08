@@ -405,6 +405,96 @@ mod tests {
         pixel.repeat(64 * 64)
     }
     #[test]
+    #[ignore = "requires Windows GPU and REKENSHI_TEST_GAME compiler DLL"]
+    fn ssao_flat_surface_contact_shading_and_disabled_identity() {
+        let source = format!(
+            r#"
+Texture2D gBuf2:register(t0); SamplerState depthSampler:register(s0);
+#define tex2Dlod(s,p) s.SampleLevel(depthSampler,(p).xy,0)
+cbuffer REKenshiSsaoConstants:register(b13) {{float4 reSsaoSettings;}};
+static const float4 pFogParams=float4(10,0,0,0), offset=0;
+static const float4x4 inverseView=float4x4(1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1);
+static const float4x4 proj=float4x4(1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-1,0);
+struct Light {{float3 diffuse; float3 specular;}};
+float4 main(float4 pixel:SV_Position,float2 uv:TEXCOORD0):SV_Target {{
+float3 ray=float3(uv*float2(2,-2)+float2(-1,1),-1);
+float distance=gBuf2.SampleLevel(depthSampler,uv,0).r*pFogParams.x;
+float4 viewPos=float4(normalize(ray)*distance,1); float3 normal=float3(0,0,1);
+Light envLight; envLight.diffuse=0.4; envLight.specular=0;
+{}
+return float4(reSsaoSettings.w>0.5 ? reAo.xxx : envLight.diffuse+0.2,1);
+}}"#,
+            include_str!("../ssao.hlsl")
+        );
+        let depth = |occluder: bool| {
+            let mut pixels = Vec::new();
+            for y in 0..64 {
+                for x in 0..64 {
+                    let rx = (x as f32 + 0.5) / 32. - 1.;
+                    let ry = (y as f32 + 0.5) / 32. - 1.;
+                    let z = if occluder && x < 32 { 4.5 } else { 5. };
+                    let radial = z * (1. + rx * rx + ry * ry).sqrt();
+                    pixels.extend_from_slice(&[(radial / 10. * 255.).round() as u8, 0, 0, 255]);
+                }
+            }
+            pixels
+        };
+        let sample = |pixels: &[u8], x: usize| pixels[(32 * 64 + x) * 4];
+        check_pipeline_with_ssao(
+            source.as_bytes(),
+            [0.; 16],
+            &depth(false),
+            Some([1., 1.5, 0.06, 1.]),
+            |pixels| {
+                assert!(
+                    sample(pixels, 32) >= 250,
+                    "flat surface self-occluded: {}",
+                    sample(pixels, 32)
+                );
+            },
+        );
+        check_pipeline_with_ssao(
+            source.as_bytes(),
+            [0.; 16],
+            &depth(true),
+            Some([1., 1.5, 0.06, 1.]),
+            |pixels| {
+                assert!(
+                    sample(pixels, 33) < 245,
+                    "contact must occlude: {}",
+                    sample(pixels, 33)
+                );
+                assert!(sample(pixels, 53) >= 250, "distant surface must stay open");
+            },
+        );
+        check_pipeline_with_ssao(
+            source.as_bytes(),
+            [0.; 16],
+            &depth(true),
+            Some([0., 1.5, 0.06, 0.]),
+            |pixels| {
+                assert!(
+                    pixels
+                        .chunks_exact(4)
+                        .all(|p| p[0].abs_diff(153) <= 1 && p[3] == 255)
+                );
+            },
+        );
+        check_pipeline_with_ssao(
+            source.as_bytes(),
+            [0.; 16],
+            &depth(true),
+            Some([1., 1.5, 0.06, 0.]),
+            |pixels| {
+                assert!(sample(pixels, 33) < 153);
+                assert!(
+                    pixels.chunks_exact(4).all(|p| p[0] >= 51),
+                    "direct light must survive AO"
+                );
+            },
+        );
+    }
+    #[test]
     #[ignore = "requires Windows GPU and REKENSHI_TEST_GAME pointing to the compiler DLL"]
     fn kenshi2_sample_identity_ink_palette_exposure_and_alpha() {
         let source = include_bytes!("../../../../samples/kenshi2-style/src/style.hlsl");
@@ -452,6 +542,15 @@ mod tests {
         input: &[u8],
         check: impl FnOnce(&[u8]),
     ) {
+        check_pipeline_with_ssao(source, parameters, input, None, check);
+    }
+    fn check_pipeline_with_ssao(
+        source: &[u8],
+        parameters: [f32; 16],
+        input: &[u8],
+        ssao: Option<[f32; 4]>,
+        check: impl FnOnce(&[u8]),
+    ) {
         let game = std::path::PathBuf::from(
             std::env::var_os("REKENSHI_TEST_GAME").expect("game directory"),
         );
@@ -474,6 +573,8 @@ mod tests {
             context: 0,
             saw_lighting: true,
             failed: false,
+            ssao: [0., 1.5, 0.04, 0.],
+            ssao_gpu: None,
         };
         // SAFETY: Test owns this immediate context and all resources. Descriptors
         // use documented D3D11 flags; mapped data is read only until Unmap.
@@ -532,6 +633,25 @@ mod tests {
             context.VSSetShader(&g.vertex, None);
             context.PSSetShader(&g.effects[0].0, None);
             context.PSSetConstantBuffers(0, Some(&[Some(g.effects[0].1.clone())]));
+            let mut ao_buffer = None;
+            if let Some(values) = ssao {
+                device
+                    .CreateBuffer(
+                        &D3D11_BUFFER_DESC {
+                            ByteWidth: 16,
+                            Usage: D3D11_USAGE_DEFAULT,
+                            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+                            ..Default::default()
+                        },
+                        Some(&D3D11_SUBRESOURCE_DATA {
+                            pSysMem: values.as_ptr().cast(),
+                            ..Default::default()
+                        }),
+                        Some(&mut ao_buffer),
+                    )
+                    .unwrap();
+                context.PSSetConstantBuffers(13, Some(&[ao_buffer.clone()]));
+            }
             context.OMSetBlendState(&g.blend, Some(&[0.1, 0.2, 0.3, 0.4]), 12345);
             context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
             let old_viewports = [

@@ -42,77 +42,14 @@ class Hooks(C.Structure):
 GET_HOOKS = CALL(C.c_int32, C.c_uint32, C.POINTER(Hooks), C.c_size_t)
 
 def child(folder, warm):
-    modules = {}
-    claims = {}
-    logs = []
+    game = pathlib.Path(sys.argv[4])
+    C.WinDLL(str(game / 'MyGUIEngine_x64.dll'))
+    C.WinDLL(str(folder / 'OgreMain_x64.dll'))
     compiler = C.WinDLL(str(folder / 'D3DCompiler_43.dll'))
-    targets = {3: C.cast(compiler.D3DCompile, C.c_void_p).value,
-               4: C.cast(compiler.D3DCreateBlob, C.c_void_p).value}
-    @HOOK_RESOLVE
-    def hook_resolve(id, output, size):
-        if size != C.sizeof(HookInfo) or id not in range(1, 6):
-            return 2
-        address = targets.get(id)
-        if not address:
-            return 4
-        owner = claims.get(address)
-        output[0] = HookInfo(size, id, address, owner or 0, 2 if owner is not None else 1, 0)
-        return 0
-    @HOOK_PUBLISH
-    def hook_publish(token, id, address):
-        if id != 5:
-            return 2
-        if claims.get(address) != token:
-            return 1
-        if id in targets and targets[id] != address:
-            return 3
-        targets[id] = address
-        return 0
-    @GET_HOOKS
-    def get_hooks(version, output, size):
-        if version != 1 or size != C.sizeof(Hooks):
-            return 2
-        output[0] = Hooks(size, 1, hook_resolve, hook_publish)
-        return 0
-    @LOG
-    def log(token, ptr, length):
-        message = C.string_at(ptr, length).decode('utf8', errors='replace')
-        logs.append(message)
-        print(f'[{token}] {message}', flush=True)
-    @RESOLVE
-    def resolve(module, name):
-        if module.lower() == b're_kenshi_rust.dll' and name == b'rekenshi_hooks_api':
-            return C.cast(get_hooks, C.c_void_p).value
-        dll = modules.get(module.decode().lower())
-        return C.cast(getattr(dll, name.decode()), C.c_void_p).value if dll else None
-    @CLAIM
-    def claim(token, ptr):
-        if ptr in claims:
-            return 3
-        claims[ptr] = token
-        return 0
-    @CLAIM
-    def release(token, ptr):
-        if claims.get(ptr) != token:
-            return 1
-        del claims[ptr]
-        return 0
-    @COUNT
-    def count():
-        return 0
-    sessions = []
-    def start(file, token):
-        dll = C.WinDLL(str(folder / 'RE_Kenshi_Rust' / 'plugins' / file))
-        modules[file] = dll
-        dll.rekenshi_plugin_entry.argtypes = [C.c_uint32, C.POINTER(Plugin), C.c_size_t]
-        dll.rekenshi_plugin_entry.restype = C.c_int32
-        plugin = Plugin()
-        assert dll.rekenshi_plugin_entry(1, C.byref(plugin), C.sizeof(plugin)) == 0
-        host = Host(C.sizeof(Host), 1, token, log, resolve, claim, release, count)
-        assert plugin.start(C.byref(host)) == 0, logs
-        sessions.append((plugin, host, dll))
-        return dll
-    perf = start('rekenshi_shader_cache.dll', 1)
+    host = C.CDLL(str(folder / 'RE_Kenshi_Rust.dll'))
+    host.dllStartPlugin()
+    assert host.rekenshi_plugins_loaded() == 4, (folder / 'RE_Kenshi_Rust.log').read_text()
+    perf = C.WinDLL(str(folder / 'RE_Kenshi_Rust/plugins/rekenshi_shader_cache.dll'))
     perf.rekenshi_shader_cache_hits.restype = C.c_uint64
     compiler.D3DCompile.argtypes = [C.c_void_p, C.c_size_t, C.c_char_p, C.POINTER(Macro), C.c_void_p, C.c_char_p, C.c_char_p, C.c_uint32, C.c_uint32, C.POINTER(C.c_void_p), C.POINTER(C.c_void_p)]
     compiler.D3DCompile.restype = C.c_int32
@@ -189,16 +126,10 @@ def child(folder, warm):
         before = perf.rekenshi_shader_cache_hits()
         assert compile(source) == first and perf.rekenshi_shader_cache_hits() == before
         assert compile(source) == first and perf.rekenshi_shader_cache_hits() == before + 1
-    graphics = start('rekenshi_graphics.dll', 2)
-    color = start('rekenshi_color_grade.dll', 3)
-    for plugin, host, dll in reversed(sessions):
-        assert plugin.stop() == 0
-    # Native plugin callbacks must support stop/restart with retained trampolines.
-    claims.clear()
-    for plugin, host, dll in sessions:
-        assert plugin.start(C.byref(host)) == 0
-    for plugin, host, dll in reversed(sessions):
-        assert plugin.stop() == 0
+    host.dllStopPlugin()
+    host.dllStartPlugin()
+    assert host.rekenshi_plugins_loaded() == 4
+    host.dllStopPlugin()
     print('PASS native cache identity, hit/miss, macros, warnings, corruption, include passthrough, graphics registration, lifecycle', flush=True)
 
 if __name__ == '__main__':
@@ -216,10 +147,10 @@ if __name__ == '__main__':
         (stage / 'RE_Kenshi_Rust' / 'plugins.toml').write_text('schema_version=1\n' + ''.join(
             f'[[plugins]]\nfile="{name}"\nenabled=true\n' for name in
             ['rekenshi_diagnostics.dll', 'rekenshi_shader_cache.dll', 'rekenshi_graphics.dll', 'rekenshi_color_grade.dll']))
-        for file in ['D3DCompiler_43.dll', 'RenderSystem_Direct3D11_x64.dll']:
+        for file in ['OgreMain_x64.dll', 'D3DCompiler_43.dll', 'RenderSystem_Direct3D11_x64.dll']:
             shutil.copy2(game / file, stage / file)
         subprocess.run([str(ROOT / 'target' / 'release' / 'plugin-smoke.exe'),
                         str(stage / 'RE_Kenshi_Rust.dll'), str(game), '4', '0'], check=True)
         for phase in ['cold', 'warm']:
-            subprocess.run([sys.executable, __file__, '--child', str(stage), phase], check=True)
+            subprocess.run([sys.executable, __file__, '--child', str(stage), phase, str(game)], check=True)
         print(f'PASS independent-process persistence; staged files retained in {stage}')

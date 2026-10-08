@@ -160,6 +160,7 @@ pub(crate) fn release_internal() -> Result<(), String> {
     registry.hooks.retain(|_, token| *token < 1001);
     drop(registry);
     for token in tokens {
+        crate::platform::release(token)?;
         crate::gameplay::release(token);
     }
     Ok(())
@@ -197,7 +198,7 @@ pub(crate) fn start() {
         return;
     };
     for loaded in &mut manager.plugins {
-        if loaded.state != State::Ready {
+        if !matches!(loaded.state, State::Ready | State::Prepared) {
             continue;
         }
         if let Ok(mut registry) = registry().lock() {
@@ -235,6 +236,40 @@ pub(crate) fn start() {
         failed_count()
     ));
 }
+pub(crate) fn prepare() {
+    let manager = LOADED_PLUGINS.get_or_init(|| Mutex::new(LoadedPlugins::discover()));
+    let Ok(mut manager) = manager.lock() else {
+        return;
+    };
+    for loaded in &mut manager.plugins {
+        if loaded.state != State::Ready {
+            continue;
+        }
+        if let Ok(mut registry) = registry().lock() {
+            registry.allowed.insert(loaded.host.plugin_token);
+        }
+        let Some(prepare) = loaded.prepare else {
+            logging::write(&format!(
+                "plugin {} missing mandatory rekenshi_plugin_prepare export",
+                loaded.id
+            ));
+            loaded.stop(State::Rejected);
+            continue;
+        };
+        // SAFETY: SDK preparation export, module pinned and stable host table.
+        let result = unsafe { prepare(1, loaded.host.as_ref()) };
+        if result != OK {
+            logging::write(&format!(
+                "plugin {} preparation failed ({result}); cleaning desired registrations",
+                loaded.id
+            ));
+            loaded.stop(State::Rejected);
+        } else {
+            loaded.state = State::Prepared;
+        }
+    }
+    manager.publish_counts();
+}
 
 pub(crate) fn stop() {
     let Some(manager) = LOADED_PLUGINS.get() else {
@@ -245,11 +280,30 @@ pub(crate) fn stop() {
         return;
     };
     for loaded in manager.plugins.iter_mut().rev() {
-        if loaded.state == State::Active {
+        if matches!(loaded.state, State::Active | State::Prepared) {
             loaded.stop(State::Ready);
         }
     }
     manager.publish_counts();
+}
+pub(crate) fn dispatch_lifecycle() {
+    let Some(manager) = LOADED_PLUGINS.get() else {
+        return;
+    };
+    let Ok(mut manager) = manager.try_lock() else {
+        return;
+    };
+    for loaded in manager
+        .plugins
+        .iter_mut()
+        .filter(|p| p.state == State::Active)
+    {
+        if let Some(dispatch) = loaded.dispatch {
+            if dispatch(rekenshi_plugin_api::platform::VERSION) != OK {
+                loaded.stop(State::Rejected);
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -422,11 +476,14 @@ impl LoadedPlugins {
 #[derive(Clone, Copy, PartialEq)]
 enum State {
     Ready,
+    Prepared,
     Active,
     Rejected,
     Quarantined,
 }
 struct LoadedPlugin {
+    prepare: Option<unsafe extern "C" fn(u32, *const HostV1) -> i32>,
+    dispatch: Option<extern "C" fn(u32) -> i32>,
     file: PathBuf,
     id: String,
     descriptor: PluginV1,
@@ -444,6 +501,11 @@ impl LoadedPlugin {
             registry.active.remove(&self.id);
         }
         crate::gameplay::release(self.host.plugin_token);
+        if let Err(error) = crate::platform::release(self.host.plugin_token) {
+            logging::write(&error);
+            self.state = State::Quarantined;
+            return;
+        }
         rekenshi_weather::release(self.host.plugin_token);
         if let Err(error) = crate::services::release(self.host.plugin_token) {
             self.state = State::Quarantined;
@@ -554,7 +616,33 @@ fn load_plugin(
         "plugin discovered: {id} ({name} {version}), ABI v{ABI_VERSION}"
     ));
     let (ui, rows) = read_ui(module.0)?;
+    // SAFETY: Optional SDK-defined scalar-only export; the owning DLL is pinned.
+    let dispatch =
+        unsafe { GetProcAddress(module.0, c"rekenshi_plugin_dispatch".as_ptr().cast()) }.map(
+            |symbol| {
+                // SAFETY: Export contract is extern C fn(u32) -> i32, negotiated by its argument.
+                unsafe {
+                    std::mem::transmute::<
+                        unsafe extern "system" fn() -> isize,
+                        extern "C" fn(u32) -> i32,
+                    >(symbol)
+                }
+            },
+        );
+    // SAFETY: Named optional preparation export has this SDK signature; DLL is pinned.
+    let prepare = unsafe { GetProcAddress(module.0, c"rekenshi_plugin_prepare".as_ptr().cast()) }
+        .map(|symbol| {
+            // SAFETY: Fixed versioned C preparation signature, not a Rust callback ABI.
+            unsafe {
+                std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    unsafe extern "C" fn(u32, *const HostV1) -> i32,
+                >(symbol)
+            }
+        });
     Ok(LoadedPlugin {
+        prepare,
+        dispatch,
         file,
         id,
         descriptor,

@@ -7,6 +7,7 @@ use std::ffi::{CStr, c_char, c_void};
 pub mod gameplay;
 pub mod graphics;
 pub mod hooks;
+pub mod platform;
 pub mod services;
 pub mod weather;
 

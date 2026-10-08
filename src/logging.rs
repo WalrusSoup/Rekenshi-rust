@@ -12,6 +12,7 @@ use windows_sys::Win32::System::LibraryLoader::{
 static LOG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 pub(crate) fn write(message: &str) {
+    crate::diagnostics::record(message);
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());

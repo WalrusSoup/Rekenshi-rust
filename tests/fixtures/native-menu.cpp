@@ -185,6 +185,9 @@ extern "C" __declspec(dllexport) size_t menu_count() { return tabs->getItemCount
 extern "C" __declspec(dllexport) void* menu_tab() { NativeText name("REKENSHI-RUST"); return tabs->findItemWith(name.get()); }
 extern "C" __declspec(dllexport) void menu_select(size_t index) { tabs->setIndexSelected(index); }
 extern "C" __declspec(dllexport) void* menu_find(const char* name) { return gui->findWidgetT(name, false); }
+extern "C" __declspec(dllexport) const char* menu_caption(MyGUI::TextBox* widget) {
+    return widget->MyGUI::TextBox::getCaption().asUTF8_c_str();
+}
 extern "C" __declspec(dllexport) void* menu_parent(MyGUI::Widget* widget) { return widget->getParent(); }
 extern "C" __declspec(dllexport) bool menu_visible(MyGUI::Widget* widget) {
     for (auto w = widget; w; w = w->getParent()) if (!w->getVisible()) return false;

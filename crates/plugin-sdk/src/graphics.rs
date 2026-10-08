@@ -1,102 +1,144 @@
-//! Owned client handle: every operation executes in the host's one GPU backend.
+//! Owned desired post-tonemap effects, activated by any public renderer provider.
 use crate::{
-    Context,
-    abi::{HostV1, OK, graphics::*},
+    Context, Error,
+    operations::{Operations, Registration},
 };
-/// Owned post-tonemap effect; removal and Drop release its host registration.
+use std::sync::{
+    Arc, RwLock,
+    atomic::{AtomicU64, Ordering},
+};
+/// Public copied effect-list contract. Records: u32 byte length, i32 priority,
+/// sixteen finite f32 parameters, then UTF-8 HLSL bytes. At most 32 records.
+pub const EFFECTS: &str = "rekenshi.render.post-tonemap-effects@1";
+static SERIAL: AtomicU64 = AtomicU64::new(1);
+/// Owned effect rule. Provider absence leaves it pending; Drop quiesces its rule.
 #[derive(Debug)]
 pub struct PostProcess {
-    api: GraphicsV2,
-    token: u64,
-    handle: Option<u64>,
+    registration: Registration,
+    parameters: Arc<RwLock<[f32; 16]>>,
 }
 impl PostProcess {
-    /// Register an owned post-tonemap shader effect with copied source and parameters.
+    /// Register copied shader policy before native resources exist.
     ///
     /// # Errors
-    /// Returns a failure when service negotiation, validation, or the host operation fails.
+    /// Rejects invalid source, non-finite parameters, ownership conflicts or host failure.
     pub fn new(
         context: &Context,
         shader: &[u8],
         priority: i32,
         parameters: [f32; 16],
-    ) -> Result<Self, crate::Error> {
-        let host = context.host.native();
-        let api = api(host)?;
-        let descriptor = EffectV1 {
-            struct_size: size_of::<EffectV1>() as u32,
-            stage: POST_TONEMAP,
-            priority,
-            reserved: 0,
-            hlsl: shader.as_ptr(),
-            hlsl_len: shader.len(),
-            parameters,
-        };
-        let mut handle = 0;
-        // SAFETY: Negotiated pinned API; descriptor and source remain readable
-        // for this call, output is writable, host copies all inputs.
-        let result = unsafe { (api.register)(host.plugin_token, &descriptor, &mut handle) };
-        if result != OK {
-            return Err(crate::Error::host("graphics", result));
+    ) -> Result<Self, Error> {
+        if shader.is_empty()
+            || shader.len() > 256 * 1024
+            || std::str::from_utf8(shader).is_err()
+            || !parameters.iter().all(|v| v.is_finite())
+        {
+            return Err("invalid effect source or parameters".into());
         }
+        let parameters = Arc::new(RwLock::new(parameters));
+        let captured = Arc::clone(&parameters);
+        let source = shader.to_vec();
+        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+        let registration = Operations::new(context)?.transform(
+            EFFECTS,
+            &format!("rekenshi.effect.{serial}@1"),
+            priority,
+            move |_, input| {
+                if decode_effects(input)?.len() >= 32 {
+                    return Err("too many effects".into());
+                }
+                let mut result = input.to_vec();
+                result.extend_from_slice(&((68 + source.len()) as u32).to_le_bytes());
+                result.extend_from_slice(&priority.to_le_bytes());
+                for value in *captured.read().map_err(|_| "effect parameters poisoned")? {
+                    result.extend_from_slice(&value.to_le_bytes());
+                }
+                result.extend_from_slice(&source);
+                Ok(Some(result))
+            },
+        )?;
+        context.log(
+            "owned post-tonemap effect policy registered; provider activation pending native draw",
+        );
         Ok(Self {
-            api,
-            token: host.plugin_token,
-            handle: Some(handle),
+            registration,
+            parameters,
         })
     }
-    /// Copy sixteen finite parameters into this effect live.
+    /// Update desired finite parameters; the provider rebuilds on its next eligible draw.
     ///
     /// # Errors
-    /// Returns a failure when service negotiation, validation, or the host operation fails.
-    pub fn update(&mut self, parameters: [f32; 16]) -> Result<(), crate::Error> {
-        let handle = self.handle.ok_or("effect already removed")?;
-        // SAFETY: Host copies the sixteen readable parameters synchronously.
-        let result =
-            unsafe { (self.api.update)(self.token, handle, parameters.as_ptr(), parameters.len()) };
-        if result == OK {
-            Ok(())
-        } else {
-            Err(crate::Error::host("graphics", result))
+    /// Rejects non-finite values or a host quiescence failure, preserving old parameters.
+    pub fn update(&mut self, parameters: [f32; 16]) -> Result<(), Error> {
+        if !parameters.iter().all(|v| v.is_finite()) {
+            return Err("non-finite effect parameters".into());
         }
-    }
-    /// Remove this effect; repeated successful removal is harmless.
-    ///
-    /// # Errors
-    /// Returns a failure when service negotiation, validation, or the host operation fails.
-    pub fn remove(&mut self) -> Result<(), crate::Error> {
-        if let Some(handle) = self.handle {
-            // SAFETY: Negotiated pinned callback, scalar owner/handle contract.
-            let result = unsafe { (self.api.remove)(self.token, handle) };
-            if result != OK {
-                return Err(crate::Error::host("graphics", result));
-            }
-            self.handle = None;
+        let old = std::mem::replace(
+            &mut *self
+                .parameters
+                .write()
+                .map_err(|_| "effect parameters poisoned")?,
+            parameters,
+        );
+        if let Err(error) = self.registration.changed() {
+            *self
+                .parameters
+                .write()
+                .map_err(|_| "effect parameters poisoned")? = old;
+            return Err(error);
         }
         Ok(())
     }
-}
-impl Drop for PostProcess {
-    fn drop(&mut self) {
-        let _ = self.remove();
+    /// Release desired behavior after admitted callbacks finish.
+    ///
+    /// # Errors
+    /// Host quiescence failure retains ownership.
+    pub fn remove(&mut self) -> Result<(), Error> {
+        self.registration.remove()
     }
 }
-fn api(host: HostV1) -> Result<GraphicsV2, crate::Error> {
-    let address = host
-        .find_export(c"RE_Kenshi_Rust.dll", c"rekenshi_graphics_api_v2")
-        .ok_or_else(|| crate::Error::unavailable("graphics"))?;
-    // SAFETY: Named SDK host export has exactly GetApiV2 signature and is pinned.
-    let get: GetApiV2 = unsafe { std::mem::transmute(address.as_ptr()) };
-    let mut output = std::mem::MaybeUninit::uninit();
-    // SAFETY: Writable aligned output and exact version/size.
-    let result = unsafe { get(VERSION_V2, output.as_mut_ptr(), size_of::<GraphicsV2>()) };
-    if result != OK {
-        return Err(crate::Error::host("graphics", result));
+/// Provider-side owned decoded effect specification; contains no native resources.
+#[derive(Debug)]
+pub struct Effect {
+    /// Ascending pass order.
+    pub priority: i32,
+    /// Copied finite shader constants.
+    pub parameters: [f32; 16],
+    /// Copied UTF-8 shader source.
+    pub source: Vec<u8>,
+}
+/// Validate an entire effect-list transaction before compiling or changing resources.
+///
+/// # Errors
+/// Rejects truncated, excessive, non-finite or malformed effect records.
+pub fn decode_effects(mut input: &[u8]) -> Result<Vec<Effect>, Error> {
+    let mut result = Vec::new();
+    while !input.is_empty() {
+        if input.len() < 4 || result.len() == 32 {
+            return Err("invalid effect list".into());
+        }
+        let length =
+            u32::from_le_bytes(input[..4].try_into().map_err(|_| "effect length")?) as usize;
+        input = &input[4..];
+        if !(69..=68 + 256 * 1024).contains(&length) || length > input.len() {
+            return Err("invalid effect record".into());
+        }
+        let record = &input[..length];
+        input = &input[length..];
+        let priority = i32::from_le_bytes(record[..4].try_into().map_err(|_| "effect priority")?);
+        let mut parameters = [0.; 16];
+        for (value, bytes) in parameters.iter_mut().zip(record[4..68].chunks_exact(4)) {
+            *value = f32::from_le_bytes(bytes.try_into().map_err(|_| "effect parameter")?);
+        }
+        if !parameters.iter().all(|v| v.is_finite()) || std::str::from_utf8(&record[68..]).is_err()
+        {
+            return Err("invalid effect values".into());
+        }
+        result.push(Effect {
+            priority,
+            parameters,
+            source: record[68..].to_vec(),
+        });
     }
-    // SAFETY: Successful host negotiation initializes the table.
-    let api: GraphicsV2 = unsafe { output.assume_init() };
-    if api.struct_size as usize != size_of::<GraphicsV2>() || api.abi_version != VERSION_V2 {
-        return Err("incompatible graphics service".into());
-    }
-    Ok(api)
+    Ok(result)
 }

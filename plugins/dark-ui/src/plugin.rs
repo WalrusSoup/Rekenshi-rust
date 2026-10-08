@@ -4,8 +4,10 @@ use super::native;
 use rekenshi_plugin_runtime::{Context, Control, Plugin, Setting, Settings, Value};
 
 /// Built-in dark UI settings using the host-prepared native adapter.
-#[derive(Debug)]
-pub struct DarkUi;
+#[derive(Debug, Default)]
+pub struct DarkUi {
+    policy: rekenshi_plugin_sdk::policies::DesiredPolicy,
+}
 const SETTINGS: &[Setting] = &[
     Setting {
         key: "ui.dark_mode",
@@ -36,7 +38,24 @@ impl Plugin for DarkUi {
     fn settings(&self) -> &'static [Setting] {
         SETTINGS
     }
-    fn start(
+    fn register(
+        &mut self,
+        context: &Context,
+        settings: &Settings,
+    ) -> Result<(), rekenshi_plugin_runtime::Error> {
+        self.policy.set(
+            context.host.native(),
+            rekenshi_plugin_sdk::policies::UI,
+            "rekenshi.builtin.dark-ui@1",
+            (settings.enabled("ui.dark_mode")).then_some([
+                1.,
+                settings.number("ui.panel_brightness") as f32,
+                0.,
+                0.,
+            ]),
+        )
+    }
+    fn install(
         &mut self,
         context: &Context,
         settings: &Settings,
@@ -44,20 +63,20 @@ impl Plugin for DarkUi {
         if !native::prepared() {
             return Err("supported MyGUI adapter is unavailable".into());
         }
-        self.update(context, settings)
+        native::publish_policy(context.host.native())?;
+        self.settings_changed(context, settings)
     }
-    fn update(
+    fn settings_changed(
         &mut self,
-        _: &Context,
+        context: &Context,
         settings: &Settings,
     ) -> Result<(), rekenshi_plugin_runtime::Error> {
-        native::configure(
-            settings.enabled("ui.dark_mode"),
-            settings.number("ui.panel_brightness"),
-        );
-        Ok(())
+        self.register(context, settings)
     }
+
     fn stop(&mut self) -> Result<(), rekenshi_plugin_runtime::Error> {
+        self.policy.remove()?;
+        native::revoke_policy()?;
         native::configure(false, 0.6);
         Ok(())
     }

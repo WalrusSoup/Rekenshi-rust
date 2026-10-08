@@ -26,6 +26,17 @@ the [performance inventory](docs/performance.md) records supported builds and
 remaining RE_Kenshi work. The [sample catalog](samples/README.md) separates
 implemented examples from researched ecosystem references.
 
+The proposed [modding platform specification](docs/plugin-platform-spec.md) and
+[example Rust interface](docs/plugin-platform-api.md) describe the future extension
+system, including built-in/external plugin parity. These are design documents;
+their proposed interfaces are not available in the current SDK.
+The [implementation record](docs/plugin-platform-implementation.md) describes the
+public operation broker, generation notifications and compiler-source migration
+now implemented, with an [independent DLL example](samples/source-transform/README.md).
+The remaining native migrations and lifecycle evidence are listed explicitly.
+The [tool decision guide](docs/modding-tool-boundary.md) explains when to use FCS,
+existing content tools, Rust plugins, or a combination.
+
 ## Build and verify
 
 Requires Windows x64, stable Rust 1.85+ and the MSVC linker/Windows SDK.
@@ -71,6 +82,12 @@ gets a `RE_Kenshi Rust 0.4.0 loaded | N plugins` indicator. Open
 **Options -> REKENSHI-RUST** for built-in and loaded-mod controls. Controls apply
 live; built-in choices live in `modpack.toml`, DLL-mod choices in
 `settings/<plugin-id>.toml`. Upgrades preserve existing choices.
+
+Enable **Developer diagnostics / Debug overlay** on the same Options tab to inspect
+recent host/plugin logs, active plugins, cache counters and public operation
+registrations/generations while playing. **Freeze debug overlay** holds the current
+snapshot. Both controls apply live and persist; the overlay is off by default and
+passes mouse input through. See [debug overlay](docs/debug-overlay.md) for details.
 
 **Dark game UI** darkens Kenshi's original HUD, window frames and panel controls
 while retaining their worn metal artwork. Body text becomes light; status colours,

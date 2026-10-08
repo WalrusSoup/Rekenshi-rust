@@ -14,6 +14,7 @@ detour = { workspace = true }
 rekenshi-native = { workspace = true }
 rekenshi-plugin-api = { workspace = true }
 rekenshi-plugin-runtime = { workspace = true }
+rekenshi-plugin-sdk.workspace = true
 serde = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
 toml = { workspace = true }

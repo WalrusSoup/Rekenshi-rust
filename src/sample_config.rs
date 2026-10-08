@@ -22,7 +22,8 @@ pub(crate) fn migrate_settings(root: &Path) -> Result<(), String> {
     else {
         return Ok(());
     };
-    let mut changed = false;
+    // Retired file-patch controls must not block strict settings validation.
+    let mut changed = values.remove("weather.fix_blood_rain").is_some();
     // Frozen legacy keys: new DLL mods persist their own declarations in
     // settings/<id>.toml and need no changes to this host migration.
     for (id, keys) in [
@@ -145,7 +146,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let original = "schema_version=1\n[settings.values]\n\"performance.shader_cache\"=false\n\"graphics.color_grade\"=true\n\"weather.rain_visibility\"=0.7\n\"custom.setting\"=true\n";
+        let original = "schema_version=1\n[settings.values]\n\"performance.shader_cache\"=false\n\"graphics.color_grade\"=true\n\"weather.rain_visibility\"=0.7\n\"weather.fix_blood_rain\"=true\n\"custom.setting\"=true\n";
         std::fs::write(root.join("modpack.toml"), original).unwrap();
         std::fs::write(
             root.join("samples.toml"),
@@ -156,6 +157,7 @@ mod tests {
         let migrated = read(&root.join("modpack.toml")).unwrap();
         assert!(!migrated.contains("graphics.color_grade"));
         assert!(!migrated.contains("weather.rain_visibility"));
+        assert!(!migrated.contains("weather.fix_blood_rain"));
         assert!(
             read(&root.join("settings/rain-refinement.toml"))
                 .unwrap()

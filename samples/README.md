@@ -12,6 +12,7 @@ them. Start with the [Rust SDK quickstart](../docs/plugin-sdk.md) or run
 | [Color grade](color-grade/README.md) | `cargo build --release -p rekenshi-color-grade-dll` | `rekenshi_color_grade_sample.dll` |
 | [Rain refinement](rain-refinement/README.md) | `cargo build --release -p rekenshi-rain-refinement` | `rekenshi_rain_refinement.dll` |
 | [Callback counter](callback-counter/src/counter.rs) | `cargo build --release -p rekenshi-callback-counter` | `rekenshi_callback_counter.dll` |
+| [Source transform](source-transform/README.md) | `cargo build --release -p rekenshi-source-transform` | `rekenshi_source_transform.dll` |
 
 Copy only the desired DLLs into `Kenshi/RE_Kenshi_Rust/plugins/` and restart.
 Installer defaults enable folder discovery. No registry entry or `samples.toml`

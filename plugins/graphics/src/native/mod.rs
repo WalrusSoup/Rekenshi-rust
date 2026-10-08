@@ -1,6 +1,7 @@
 //! Native Direct3D11 post-tonemap effect service. Does not use Kenshi private RVAs.
 mod pipeline;
 mod shader;
+mod ssao;
 use detour::{Threads, Transaction, TypedDetour};
 use rekenshi_plugin_api::hooks::HookId;
 use rekenshi_plugin_api::{ERROR, HostV1, INCOMPATIBLE, OK, graphics::*};
@@ -17,9 +18,18 @@ use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Interface, w};
 type Draw = unsafe extern "system" fn(*mut c_void, u32, u32);
+type CreatePixel = unsafe extern "system" fn(
+    *mut c_void,
+    *const c_void,
+    usize,
+    *mut c_void,
+    *mut *mut c_void,
+) -> i32;
 struct Hooks {
     draw: TypedDetour<Draw>,
     target: usize,
+    create: TypedDetour<CreatePixel>,
+    create_target: usize,
 }
 struct Effect {
     token: u64,
@@ -37,12 +47,19 @@ struct Backend {
     context: usize,
     saw_lighting: bool,
     failed: bool,
+    ssao: [f32; 4],
+    ssao_gpu: Option<ssao::Gpu>,
 }
 static HOOKS: OnceLock<Hooks> = OnceLock::new();
 static BACKEND: Mutex<Option<Backend>> = Mutex::new(None);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static DRAWS: AtomicU64 = AtomicU64::new(0);
 static PASSES: AtomicU64 = AtomicU64::new(0);
+static AO_BINDINGS: AtomicU64 = AtomicU64::new(0);
+static AO_BINDING_ERRORS: AtomicU64 = AtomicU64::new(0);
+static EFFECTS: std::sync::RwLock<Option<rekenshi_plugin_sdk::operations::Provider>> =
+    std::sync::RwLock::new(None);
+static EFFECT_REVISION: AtomicU64 = AtomicU64::new(0);
 thread_local! { static INSIDE: Cell<bool> = const { Cell::new(false) }; }
 
 pub(super) fn initialize(host: HostV1, root: &std::path::Path) -> Result<(), String> {
@@ -110,22 +127,38 @@ pub(super) fn initialize(host: HostV1, root: &std::path::Path) -> Result<(), Str
         let _ = unsafe { DestroyWindow(window) };
         result.map_err(|e| e.to_string())?;
         let context = context.ok_or("no D3D context")?;
+        let device = device.ok_or("no D3D device")?;
         let address = Interface::vtable(&context).Draw as *const c_void;
         // SAFETY: The typed COM vtable identifies exactly ID3D11DeviceContext::Draw.
         let target: Draw = unsafe { std::mem::transmute(address) };
         // SAFETY: Identical Windows x64 signature. Runtime pinned by host reservation.
         let draw =
             unsafe { TypedDetour::new(target, intercepted as Draw) }.map_err(|e| e.to_string())?;
+        let create_address = Interface::vtable(&device).CreatePixelShader as *const c_void;
+        // SAFETY: Documented device vtable method and identical Windows x64 ABI.
+        let create = unsafe {
+            TypedDetour::new(
+                std::mem::transmute::<*const c_void, CreatePixel>(create_address),
+                create_pixel as CreatePixel,
+            )
+        }
+        .map_err(|e| e.to_string())?;
         HOOKS
             .set(Hooks {
                 draw,
                 target: address as usize,
+                create,
+                create_target: create_address as usize,
             })
             .map_err(|_| "hooks already initialized")?;
     }
     let hooks = HOOKS.get().ok_or("hooks unavailable")?;
     host.reserve_hook(std::ptr::NonNull::new(hooks.target as *mut c_void).ok_or("draw target")?)
         .map_err(|e| format!("Draw hook conflict: {e}"))?;
+    host.reserve_hook(
+        std::ptr::NonNull::new(hooks.create_target as *mut c_void).ok_or("shader target")?,
+    )
+    .map_err(|e| format!("CreatePixelShader hook conflict: {e}"))?;
     let catalog = host.hooks().map_err(|e| format!("hook catalog: {e}"))?;
     // SAFETY: This is the actual typed D3D11 vtable method discovered above,
     // reserved/pinned through the host, not our trampoline or callback.
@@ -145,22 +178,47 @@ pub(super) fn initialize(host: HostV1, root: &std::path::Path) -> Result<(), Str
         context: 0,
         saw_lighting: false,
         failed: false,
+        ssao: [0., 1.5, 0.04, 0.],
+        ssao_gpu: None,
     });
     let mut tx = Transaction::new();
     tx.enable(&hooks.draw);
+    tx.enable(&hooks.create);
     // SAFETY: Installed outside DllMain; patch transaction suspends existing
     // threads and relocates live instruction pointers. Code/trampoline retained.
     unsafe { tx.commit(Threads::All) }.map_err(|e| e.to_string())?;
     ACTIVE.store(true, Ordering::Release);
+    ssao::publish(host)?;
+    *EFFECTS.write().map_err(|_| "effect provider lock")? = Some(rekenshi_plugin_sdk::operations::Operations::from_host(host)
+        .and_then(|operations| operations.publish(rekenshi_plugin_sdk::operations::Contract::new(
+            rekenshi_plugin_sdk::render::EFFECTS, "rekenshi.effect-list-le@1",
+            "Synchronous renderer lane; copied HLSL and constants; native COM resources remain provider-owned",
+            "D3D11 Draw vtable, inspected HDR lighting then LDR tonemap target; resources rebuilt for device/size/format identity", 9*1024*1024)?))
+        .map_err(|e| e.to_string())?);
+    EFFECT_REVISION.store(0, Ordering::Release);
     host.write_log("D3D11 Draw hook active; awaiting world HDR resolve; GUI excluded");
     Ok(())
 }
 pub(super) fn stop() -> i32 {
     std::panic::catch_unwind(|| {
+        let Ok(mut effects) = EFFECTS.write() else {
+            return ERROR;
+        };
+        if let Some(provider) = effects.as_mut() {
+            if provider.revoke().is_err() {
+                return ERROR;
+            }
+        }
+        *effects = None;
+        drop(effects);
+        if ssao::revoke().is_err() {
+            return ERROR;
+        }
         ACTIVE.store(false, Ordering::Release);
         if let Some(h) = HOOKS.get() {
             let mut tx = Transaction::new();
             tx.disable(&h.draw);
+            tx.disable(&h.create);
             // SAFETY: Same patching invariants as start; retain the trampoline.
             if unsafe { tx.commit(Threads::All) }.is_err() {
                 return ERROR;
@@ -323,14 +381,33 @@ unsafe extern "C" fn remove(token: u64, handle: u64) -> i32 {
     })
     .unwrap_or(ERROR)
 }
+unsafe extern "system" fn create_pixel(
+    this: *mut c_void,
+    code: *const c_void,
+    length: usize,
+    linkage: *mut c_void,
+    output: *mut *mut c_void,
+) -> i32 {
+    let Some(h) = HOOKS.get() else {
+        return -2147467259;
+    };
+    // SAFETY: Forward the original COM method unchanged, tag only successful outputs.
+    unsafe {
+        let result = h.create.call(this, code, length, linkage, output);
+        if result >= 0 && !output.is_null() && ACTIVE.load(Ordering::Acquire) {
+            ssao::tag(code, length, output.read());
+        }
+        result
+    }
+}
 unsafe extern "system" fn intercepted(this: *mut c_void, count: u32, first: u32) {
     let Some(h) = HOOKS.get() else { return };
-    // SAFETY: Same native signature and arguments as the original Draw.
-    unsafe { h.draw.call(this, count, first) };
     if !ACTIVE.load(Ordering::Acquire)
         || !matches!(count, 3 | 4)
         || INSIDE.with(|c| c.replace(true))
     {
+        // SAFETY: Original native arguments; inactive/reentrant draws forward once.
+        unsafe { h.draw.call(this, count, first) };
         return;
     }
     struct Reset;
@@ -340,6 +417,35 @@ unsafe extern "system" fn intercepted(this: *mut c_void, count: u32, first: u32)
         }
     }
     let _reset = Reset;
+    let binding = std::panic::catch_unwind(|| {
+        let mut backend = BACKEND.lock().ok()?;
+        let b = backend.as_mut()?;
+        // SAFETY: Borrowed native Draw context lives through the synchronous call.
+        let context = unsafe { ID3D11DeviceContext::from_raw_borrowed(&this) }?;
+        // The private shader tag is our positive identification; avoid another
+        // full render-target/resource scan on every draw before the original.
+        match ssao::bind(context, &mut b.ssao_gpu, b.ssao) {
+            Ok(binding) => {
+                if binding.is_some() && AO_BINDINGS.fetch_add(1, Ordering::Relaxed) == 0 {
+                    b.host.write_log(
+                        "SSAO: tagged deferred lighting draw bound; ambient-only shading available",
+                    );
+                }
+                binding
+            }
+            Err(error) => {
+                if AO_BINDING_ERRORS.fetch_add(1, Ordering::Relaxed) == 0 {
+                    b.host.write_log(&format!("SSAO binding skipped: {error}"));
+                }
+                None
+            }
+        }
+    })
+    .ok()
+    .flatten();
+    // SAFETY: The exact original draw runs with scoped host constants, when tagged.
+    unsafe { h.draw.call(this, count, first) };
+    drop(binding);
     let _ = std::panic::catch_unwind(|| {
         let Ok(mut backend) = BACKEND.lock() else {
             return;
@@ -348,6 +454,7 @@ unsafe extern "system" fn intercepted(this: *mut c_void, count: u32, first: u32)
         if !ACTIVE.load(Ordering::Acquire) {
             return;
         }
+        refresh_effects(b);
         DRAWS.fetch_add(1, Ordering::Relaxed);
         // SAFETY: Draw's COM this pointer is borrowed for this synchronous callback.
         let Some(context) = (unsafe { ID3D11DeviceContext::from_raw_borrowed(&this) }) else {
@@ -386,6 +493,55 @@ unsafe extern "system" fn intercepted(this: *mut c_void, count: u32, first: u32)
         }
     });
 }
+fn refresh_effects(backend: &mut Backend) {
+    let Ok(provider) = EFFECTS.read() else {
+        return;
+    };
+    let Some(provider) = provider.as_ref() else {
+        return;
+    };
+    let Ok(revision) = provider.stamp() else {
+        return;
+    };
+    if EFFECT_REVISION.load(Ordering::Acquire) == revision {
+        return;
+    }
+    let specifications = provider
+        .dispatch(&[], &[])
+        .and_then(|bytes| rekenshi_plugin_sdk::render::decode_effects(&bytes));
+    let result: Result<Vec<Effect>, String> =
+        specifications
+            .map_err(|e| e.to_string())
+            .and_then(|specifications| {
+                specifications
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, effect)| {
+                        Ok(Effect {
+                            token: 0,
+                            handle: index as u64,
+                            priority: effect.priority,
+                            code: shader::compile(&backend.game, &effect.source, false)?,
+                            parameters: effect.parameters,
+                        })
+                    })
+                    .collect()
+            });
+    // Remove retired policy resources even when a replacement fails to compile.
+    backend.effects.retain(|effect| effect.token != 0);
+    match result {
+        Ok(effects) => backend.effects.extend(effects),
+        Err(error) => backend
+            .host
+            .write_log(&format!("desired postprocess rejected: {error}")),
+    }
+    backend
+        .effects
+        .sort_by_key(|effect| (effect.priority, effect.token, effect.handle));
+    backend.gpu = None;
+    backend.failed = false;
+    EFFECT_REVISION.store(revision, Ordering::Release);
+}
 // SAFETY: Scalar status export with no pointers.
 pub fn passes() -> u64 {
     PASSES.load(Ordering::Relaxed)
@@ -406,38 +562,4 @@ pub(super) fn update_effect(token: u64, handle: u64, parameters: [f32; 16]) -> R
     b.gpu = None;
     b.failed = false;
     Ok(())
-}
-
-pub(super) fn register_owned(
-    token: u64,
-    source: &[u8],
-    priority: i32,
-    parameters: [f32; 16],
-) -> Result<u64, String> {
-    let descriptor = EffectV1 {
-        struct_size: size_of::<EffectV1>() as u32,
-        stage: POST_TONEMAP,
-        priority,
-        reserved: 0,
-        hlsl: source.as_ptr(),
-        hlsl_len: source.len(),
-        parameters,
-    };
-    let mut handle = 0;
-    // SAFETY: Descriptor/source/output remain valid for synchronous registration;
-    // the backend copies all shader data and parameters before returning.
-    if unsafe { register(token, &descriptor, &mut handle) } == OK {
-        Ok(handle)
-    } else {
-        Err("effect registration failed".into())
-    }
-}
-pub(super) fn remove_owned(token: u64, handle: u64) -> Result<(), String> {
-    // SAFETY: Scalar owner/handle arguments are validated under the backend lock,
-    // which serializes removal with rendering callbacks.
-    if unsafe { remove(token, handle) } == OK {
-        Ok(())
-    } else {
-        Err("effect removal failed".into())
-    }
 }

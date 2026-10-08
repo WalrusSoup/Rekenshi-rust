@@ -10,8 +10,8 @@ impl Plugin for MyMod {
         key:"__ID__.enabled", label:"Enabled", description:"Enable this mod.",
         default:Value::Toggle(true), control:Control::Toggle,
     }] }
-    fn start(&mut self,context:&Context,settings:&Settings)->Result<(),rekenshi_plugin_sdk::Error> {
-        self.update(context,settings)?;
+    fn install(&mut self,context:&Context,settings:&Settings)->Result<(),rekenshi_plugin_sdk::Error> {
+        self.settings_changed(context,settings)?;
         let enabled=self.enabled.clone();
         let calls=self.calls.clone();
         context.host.hook_ogre_calls(move || {
@@ -24,7 +24,7 @@ impl Plugin for MyMod {
         // context.host.hook_ui_frame(move |delta| { /* UI frame behavior */ })?;
         Ok(())
     }
-    fn update(&mut self,context:&Context,settings:&Settings)->Result<(),rekenshi_plugin_sdk::Error> {
+    fn settings_changed(&mut self,context:&Context,settings:&Settings)->Result<(),rekenshi_plugin_sdk::Error> {
         self.enabled.store(settings.enabled("__ID__.enabled"),Ordering::Relaxed);
         context.log(&format!("Enabled: {}; observed calls: {}",settings.enabled("__ID__.enabled"),self.calls.load(Ordering::Relaxed)));
         Ok(())

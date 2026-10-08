@@ -2,6 +2,9 @@
 mod cache;
 use detour::{Threads, Transaction, TypedDetour};
 use rekenshi_plugin_api::{ERROR, HostV1, OK, hooks::HookId};
+use rekenshi_plugin_sdk::operations::{
+    Contract, Operations, Provider, SHADER_SCHEMA, SHADER_SOURCE,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
@@ -101,6 +104,10 @@ struct State {
 static STATE: OnceLock<State> = OnceLock::new();
 static LIFECYCLE: Mutex<()> = Mutex::new(());
 static CALLBACKS: RwLock<()> = RwLock::new(());
+static SOURCE_PROVIDER: RwLock<Option<Provider>> = RwLock::new(None);
+static BYTECODE: RwLock<Option<rekenshi_plugin_sdk::adapters::AdapterOperations>> =
+    RwLock::new(None);
+static POLICY: RwLock<Option<rekenshi_plugin_sdk::policies::PolicyProvider>> = RwLock::new(None);
 thread_local! { static INSIDE: Cell<bool> = const { Cell::new(false) }; }
 
 pub(super) fn initialize(
@@ -171,6 +178,13 @@ pub(super) fn initialize(
             .map_err(|_| "state already initialized")?;
     }
     if let Some(state) = STATE.get() {
+        let contract = Contract::new(
+            SHADER_SOURCE, SHADER_SCHEMA,
+            "D3DCompile caller; synchronous/concurrent; copied bytes only; no native access; no broker reentry",
+            "D3DCompiler_43 SHA256 44C3A7E330B54A35A9EFA015831392593AA02E7DA1460BE429D17C3644850E8A; documented Windows x64 compiler ABI; transform before cache hash; compilation failure retries original; existing shaders require restart; native detour first-use ordering requires game validation",
+            16 * 1024 * 1024,
+        ).map_err(|e| e.to_string())?;
+        let operations = Operations::from_host(host).map_err(|e| e.to_string())?;
         host.reserve_hook(std::ptr::NonNull::new(state.target as *mut c_void).ok_or("target")?)
             .map_err(|e| e.to_string())?;
         let mut tx = Transaction::new();
@@ -179,6 +193,18 @@ pub(super) fn initialize(
         // all threads suspend during patching. Trampoline lives for process life.
         unsafe { tx.commit(Threads::All) }.map_err(|e| e.to_string())?;
         state.active.store(true, Ordering::Release);
+        // Advertise usable availability only after native detour installation
+        // succeeds. Earlier compiler calls cannot be intercepted retroactively;
+        // bootstrap/activation first-use ordering still requires game evidence.
+        *SOURCE_PROVIDER
+            .write()
+            .map_err(|_| "source provider poisoned")? =
+            Some(operations.publish(contract).map_err(|e| e.to_string())?);
+        *BYTECODE.write().map_err(|_| "bytecode provider lock")? = Some(rekenshi_plugin_sdk::adapters::AdapterOperations::publish(host,
+            "Fingerprint-gated D3DCompiler_43; D3DDisassemble validates replacement DXBC; D3DCreateBlob allocates replacement, Release retires original only after success",
+            &[(rekenshi_plugin_sdk::adapters::SHADER_BYTECODE,SHADER_SCHEMA,16*1024*1024)]).map_err(|e| e.to_string())?);
+        *POLICY.write().map_err(|_| "shader policy lock")? = rekenshi_plugin_sdk::policies::PolicyProvider::optional(host, rekenshi_plugin_sdk::policies::SHADER_CACHE,
+            "D3DCompiler_43 SHA256 44C3A7E330B54A35A9EFA015831392593AA02E7DA1460BE429D17C3644850E8A; native blob allocation/Release; dependency validation; cache policy applies before lookup").map_err(|e| e.to_string())?;
         host.write_log(
             "shader cache active; compiler fingerprint verified; unknown include handlers bypassed",
         );
@@ -201,6 +227,33 @@ pub(super) fn stop() -> i32 {
             let Ok(_callbacks) = CALLBACKS.write() else {
                 return ERROR;
             };
+            let Ok(mut provider) = SOURCE_PROVIDER.write() else {
+                return ERROR;
+            };
+            if let Some(provider) = provider.as_mut() {
+                if provider.revoke().is_err() {
+                    return ERROR;
+                }
+            }
+            *provider = None;
+            let Ok(mut bytecode) = BYTECODE.write() else {
+                return ERROR;
+            };
+            if let Some(provider) = bytecode.as_mut() {
+                if provider.revoke().is_err() {
+                    return ERROR;
+                }
+            }
+            *bytecode = None;
+            let Ok(mut policy) = POLICY.write() else {
+                return ERROR;
+            };
+            if let Some(policy) = policy.as_mut() {
+                if policy.revoke().is_err() {
+                    return ERROR;
+                }
+            }
+            *policy = None;
             s.host.write_log(&format!(
                 "shader cache stopped: hits={} misses={} bypasses={} avoided_compile_ms={:.2}",
                 s.hits.load(Ordering::Relaxed),
@@ -238,10 +291,7 @@ unsafe extern "system" fn intercepted(
     // uses that contract synchronously or forwards unchanged to the trampoline.
     // SAFETY: Intercepted function's signature equals the original D3DCompile.
     unsafe {
-        if !s.active.load(Ordering::Acquire)
-            || !s.enabled.load(Ordering::Acquire)
-            || INSIDE.with(|v| v.replace(true))
-        {
+        if !s.active.load(Ordering::Acquire) || INSIDE.with(|v| v.replace(true)) {
             return s.hook.call(
                 src, len, name, defines, include, entry, target, flags1, flags2, code, errors,
             );
@@ -257,9 +307,85 @@ unsafe extern "system" fn intercepted(
             return -2147467259;
         };
         std::panic::catch_unwind(|| {
-            compile_cached(
+            // Transform first so cached bytecode always reflects the exact shader
+            // actually compiled. Cache-off still permits the host lighting feature.
+            let transformed = if !src.is_null()
+                && !code.is_null()
+                && len <= 16 * 1024 * 1024
+                && !entry.is_null()
+                && !target.is_null()
+            {
+                let source = std::slice::from_raw_parts(src.cast::<u8>(), len);
+                let metadata = [
+                    CStr::from_ptr(entry).to_bytes(),
+                    &[0],
+                    CStr::from_ptr(target).to_bytes(),
+                ]
+                .concat();
+                SOURCE_PROVIDER.read().ok().and_then(|provider| {
+                    provider.as_ref().and_then(|provider| {
+                        match provider.dispatch(&metadata, source) {
+                            Ok(output) if output != source => Some(output),
+                            Ok(_) => None,
+                            Err(error) => {
+                                s.host.write_log(&format!(
+                                    "shader source transform failed; original preserved: {error}"
+                                ));
+                                None
+                            }
+                        }
+                    })
+                })
+            } else {
+                None
+            };
+            if let Some(transformed) = transformed {
+                let mut prepared_code = std::ptr::null_mut();
+                let mut prepared_errors = std::ptr::null_mut();
+                let result = compile_cached(
+                    s,
+                    transformed.as_ptr().cast(),
+                    transformed.len(),
+                    name,
+                    defines,
+                    include,
+                    entry,
+                    target,
+                    flags1,
+                    flags2,
+                    &mut prepared_code,
+                    if errors.is_null() {
+                        std::ptr::null_mut()
+                    } else {
+                        &mut prepared_errors
+                    },
+                );
+                if result >= 0 {
+                    transform_bytecode(s, entry, target, &mut prepared_code);
+                    code.write(prepared_code);
+                    if !errors.is_null() {
+                        errors.write(prepared_errors);
+                    }
+                    s.host.write_log("shader source transforms prepared");
+                    return result;
+                }
+                // Release only compiler-owned outputs from the failed attempt,
+                // then retry the untouched shader with the original arguments.
+                for output in [prepared_code, prepared_errors] {
+                    if !output.is_null() {
+                        ((*(*output).table).release)(output);
+                    }
+                }
+                s.host
+                    .write_log("shader source compilation failed; using original source");
+            }
+            let result = compile_cached(
                 s, src, len, name, defines, include, entry, target, flags1, flags2, code, errors,
-            )
+            );
+            if result >= 0 {
+                transform_bytecode(s, entry, target, code);
+            }
+            result
         })
         .unwrap_or(-2147467259)
     }
@@ -285,7 +411,12 @@ unsafe fn compile_cached(
 ) -> i32 {
     // SAFETY: All arguments and COM outputs obey the original compiler contract.
     unsafe {
-        let supported = include.is_null() || known_include(s, include);
+        let enabled = POLICY
+            .read()
+            .ok()
+            .and_then(|p| p.as_ref().map(|p| p.values([0.; 4])[0] == 1.))
+            .unwrap_or_else(|| s.enabled.load(Ordering::Acquire));
+        let supported = enabled && (include.is_null() || known_include(s, include));
         let key = if supported && !code.is_null() && !src.is_null() && len <= 16 * 1024 * 1024 {
             key(
                 src,
@@ -393,7 +524,14 @@ unsafe fn key(
     includes: bool,
 ) -> Option<String> {
     let mut h = Sha256::new();
-    h.update(b"REKR_SHADER_CACHE_V1");
+    h.update(b"REKR_SHADER_CACHE_V2");
+    if let Some(state) = STATE.get() {
+        if let Ok(operations) = Operations::from_host(state.host) {
+            if let Ok(manifest) = operations.manifest(SHADER_SOURCE) {
+                h.update(manifest);
+            }
+        }
+    }
     h.update(COMPILER_HASH);
     h.update(RENDERER_HASH);
     fn part(h: &mut Sha256, b: Option<&[u8]>) {
@@ -606,8 +744,79 @@ pub fn hits() -> u64 {
     STATE.get().map_or(0, |s| s.hits.load(Ordering::Relaxed))
 }
 
-pub(super) fn set_enabled(enabled: bool) {
-    if let Some(state) = STATE.get() {
-        state.enabled.store(enabled, Ordering::Release);
+unsafe fn transform_bytecode(
+    state: &State,
+    entry: *const c_char,
+    target: *const c_char,
+    output: *mut *mut Blob,
+) {
+    if output.is_null() || entry.is_null() || target.is_null() {
+        return;
+    }
+    if !BYTECODE.read().ok().is_some_and(|operations| {
+        operations.as_ref().is_some_and(|operations| {
+            operations.active(rekenshi_plugin_sdk::adapters::SHADER_BYTECODE)
+        })
+    }) {
+        return;
+    }
+    // SAFETY: Successful D3DCompile initialized the output blob; native strings remain live.
+    unsafe {
+        let Some(bytes) = blob_bytes(*output) else {
+            return;
+        };
+        let metadata = [
+            CStr::from_ptr(entry).to_bytes(),
+            &[0],
+            CStr::from_ptr(target).to_bytes(),
+        ]
+        .concat();
+        let Some(replacement) = BYTECODE.read().ok().and_then(|operations| {
+            operations.as_ref().and_then(|operations| {
+                operations.transform(
+                    rekenshi_plugin_sdk::adapters::SHADER_BYTECODE,
+                    &metadata,
+                    &bytes,
+                )
+            })
+        }) else {
+            return;
+        };
+        type Disassemble = unsafe extern "system" fn(
+            *const c_void,
+            usize,
+            u32,
+            *const c_char,
+            *mut *mut Blob,
+        ) -> i32;
+        let Some(address) = state
+            .host
+            .find_export(c"D3DCompiler_43.dll", c"D3DDisassemble")
+        else {
+            return;
+        };
+        let disassemble: Disassemble = std::mem::transmute(address.as_ptr());
+        let mut validation = std::ptr::null_mut();
+        let valid = disassemble(
+            replacement.as_ptr().cast(),
+            replacement.len(),
+            0,
+            std::ptr::null(),
+            &mut validation,
+        ) >= 0;
+        if !validation.is_null() {
+            ((*(*validation).table).release)(validation);
+        }
+        if !valid {
+            return;
+        }
+        let Some(blob) = make_blob(state, &replacement) else {
+            return;
+        };
+        let original = *output;
+        *output = blob;
+        if !original.is_null() {
+            ((*(*original).table).release)(original);
+        }
     }
 }

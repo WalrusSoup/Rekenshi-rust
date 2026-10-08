@@ -17,6 +17,8 @@ pub struct Dll<P> {
 struct Session {
     runtime: Runtime,
     connection: Arc<Connection>,
+    dependencies: Vec<&'static str>,
+    installed: bool,
 }
 pub(crate) fn boundary(action: impl FnOnce() -> i32) -> i32 {
     match catch_unwind(AssertUnwindSafe(action)) {
@@ -85,11 +87,11 @@ impl<P: Plugin + Default + 'static> Dll<P> {
             }
         })
     }
-    /// Start the plugin session with the loader's trusted host table.
+    /// Register desired behavior using the loader's trusted host table.
     ///
     /// # Safety
     /// Pointer refers to the loader's negotiated stable HostV1 table.
-    pub unsafe fn start(&self, pointer: *const HostV1) -> i32 {
+    pub unsafe fn prepare(&self, pointer: *const HostV1) -> i32 {
         boundary(|| {
             if HookEvents::check_shutdown().is_err() {
                 return ERROR;
@@ -118,17 +120,19 @@ impl<P: Plugin + Default + 'static> Dll<P> {
                 let folder = root.join("settings");
                 std::fs::create_dir_all(&folder)?;
                 let mut plugins = Plugins::new().settings_path(folder.join(format!("{id}.toml")));
+                let dependencies = plugin.requires().to_vec();
                 for dependency in plugin.requires() {
-                    connection.requires(dependency)?;
                     plugins = plugins.provide(dependency);
                 }
                 let runtime = plugins
                     .register(plugin)
-                    .start(root, |_, _| Ok::<_, crate::Error>(connection.host()))?;
-                let active = runtime.active_count() == 1;
+                    .prepare(root, |_, _| Ok::<_, crate::Error>(connection.host()))?;
+                let active = runtime.rows().iter().all(|r| r.error.is_none());
                 *state = Some(Session {
                     runtime,
                     connection,
+                    dependencies,
+                    installed: false,
                 });
                 if active {
                     Ok(())
@@ -140,6 +144,41 @@ impl<P: Plugin + Default + 'static> Dll<P> {
                 Ok(()) => OK,
                 Err(error) => {
                     host.write_log(&error.to_string());
+                    ERROR
+                }
+            }
+        })
+    }
+    /// Install a session registered by the mandatory preparation phase.
+    ///
+    /// # Safety
+    /// Pointer is the loader's stable negotiated HostV1 table.
+    pub unsafe fn start(&self, pointer: *const HostV1) -> i32 {
+        boundary(|| {
+            let result: Result<(), crate::Error> = (|| {
+                let mut state = self.session.lock().map_err(|_| "plugin session poisoned")?;
+                let session = state.as_mut().ok_or("plugin not prepared")?;
+                if session.installed {
+                    return Err("plugin already installed".into());
+                }
+                for dependency in &session.dependencies {
+                    session.connection.requires(dependency)?;
+                }
+                session.connection.refresh_supports();
+                session.runtime.install()?;
+                session.installed = true;
+                if session.runtime.active_count() != 1 {
+                    return Err("plugin failed to install; see host log".into());
+                }
+                Ok(())
+            })();
+            match result {
+                Ok(()) => OK,
+                Err(error) => {
+                    // SAFETY: Forward the loader's stable table contract for diagnostics.
+                    if let Ok(host) = unsafe { HostV1::read(pointer) } {
+                        host.write_log(&error.to_string());
+                    }
                     ERROR
                 }
             }
@@ -162,6 +201,24 @@ impl<P: Plugin + Default + 'static> Dll<P> {
             }
             *state = None;
             OK
+        })
+    }
+    /// Drain pending copied lifecycle events on the host's serial game lane.
+    pub fn dispatch(&self, version: u32) -> i32 {
+        if version != abi::platform::VERSION {
+            return INCOMPATIBLE;
+        }
+        boundary(|| {
+            let Ok(mut state) = self.session.try_lock() else {
+                return OK;
+            };
+            let Some(session) = state.as_mut() else {
+                return OK;
+            };
+            match session.runtime.dispatch_lifecycle() {
+                Ok(()) => OK,
+                Err(_) => ERROR,
+            }
         })
     }
     /// Return the number of declared settings; return zero if metadata construction panics.

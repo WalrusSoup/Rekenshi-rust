@@ -36,7 +36,7 @@ impl Drop for Reader {
 fn mapped_reads_match_native_pixels_rectangles_edges_and_lifecycle() {
     let game = PathBuf::from(std::env::var_os("REKENSHI_TEST_GAME").expect("REKENSHI_TEST_GAME"));
     rekenshi_native::load_pinned(&game.join("OgreMain_x64.dll")).unwrap();
-    start(host(), &game).unwrap();
+    start_bindings(host(), &game).unwrap();
     let hooks = HOOKS.get().unwrap();
     let base = hooks.targets[0] - 0x20880;
     let path = CString::new(game.join("data/newland/land/fullmap.tif").to_str().unwrap()).unwrap();
@@ -70,45 +70,63 @@ fn mapped_reads_match_native_pixels_rectangles_edges_and_lifecycle() {
         let map = &session.as_ref().unwrap().heightmap;
         (map.layout.width as i32, map.layout.height as i32)
     };
-    set_enabled(true);
-    let before = reads();
-    for i in 0..1024 {
-        let x = ((i * 7919) % width).min(width - 1);
-        let y = ((i * 3571) % height).min(height - 1);
-        let (mut vanilla, mut cached) = (0u16, 0u16);
-        // SAFETY: Native live reader, in-bounds coordinates, two writable bytes.
-        unsafe {
-            let a = hooks
-                .pixel
-                .call(ptr, x, y, (&mut vanilla as *mut u16).cast());
-            let b = pixel(ptr, x, y, (&mut cached as *mut u16).cast());
-            assert_eq!((b, cached), (a, vanilla), "pixel {x},{y}");
-        }
-    }
-    assert_eq!(reads() - before, 1024);
-    for (x, y, w, h) in [
-        (0, 0, 4, 3),
-        (width - 4, height - 3, 4, 3),
-        (-1, -1, 4, 3),
-        (width - 2, height - 2, 4, 3),
-    ] {
-        let (mut vanilla, mut cached) = ([0xa5u16; 12], [0xa5u16; 12]);
+    for eager in [false, true] {
+        configure(!eager, eager).unwrap();
         let before = reads();
-        // SAFETY: Output arrays have w*h samples; edge rectangles are valid
-        // requests of the inspected native clipping implementation.
-        unsafe {
-            let a = hooks
-                .rectangle
-                .call(ptr, x, y, w, h, vanilla.as_mut_ptr().cast());
-            let b = rectangle(ptr, x, y, w, h, cached.as_mut_ptr().cast());
-            assert_eq!((b, cached), (a, vanilla), "rectangle {x},{y}");
+        for i in 0..1024 {
+            let x = ((i * 7919) % width).min(width - 1);
+            let y = ((i * 3571) % height).min(height - 1);
+            let (mut vanilla, mut cached) = (0u16, 0u16);
+            // SAFETY: Native live reader, in-bounds coordinates, two writable bytes.
+            unsafe {
+                let a = hooks
+                    .pixel
+                    .call(ptr, x, y, (&mut vanilla as *mut u16).cast());
+                let b = pixel(ptr, x, y, (&mut cached as *mut u16).cast());
+                assert_eq!((b, cached), (a, vanilla), "pixel {x},{y}");
+            }
         }
-        assert_eq!(
-            reads() - before,
-            u64::from(x >= 0 && y >= 0 && x + w <= width && y + h <= height)
-        );
+        assert_eq!(reads() - before, 1024);
+        for (x, y, w, h) in [
+            (0, 0, 4, 3),
+            (width - 4, height - 3, 4, 3),
+            (-1, -1, 4, 3),
+            (width - 2, height - 2, 4, 3),
+        ] {
+            let (mut vanilla, mut cached) = ([0xa5u16; 12], [0xa5u16; 12]);
+            let before = reads();
+            // SAFETY: Output arrays have w*h samples; edge rectangles are valid
+            // requests of the inspected native clipping implementation.
+            unsafe {
+                let a = hooks
+                    .rectangle
+                    .call(ptr, x, y, w, h, vanilla.as_mut_ptr().cast());
+                let b = rectangle(ptr, x, y, w, h, cached.as_mut_ptr().cast());
+                assert_eq!((b, cached), (a, vanilla), "rectangle {x},{y}");
+            }
+            assert_eq!(
+                reads() - before,
+                u64::from(x >= 0 && y >= 0 && x + w <= width && y + h <= height)
+            );
+        }
     }
-    set_enabled(false);
+    let eager = heightmap(ptr).unwrap();
+    assert!(eager.eager_bytes() > 512 * 1024 * 1024);
+    let weak = Arc::downgrade(&eager);
+    configure(false, true).unwrap();
+    assert!(
+        Arc::ptr_eq(&eager, &heightmap(ptr).unwrap()),
+        "repeated updates must reuse the copy"
+    );
+    configure(true, false).unwrap();
+    assert_eq!(heightmap(ptr).unwrap().eager_bytes(), 0);
+    assert_eq!(eager.row(0, 0, 16), heightmap(ptr).unwrap().row(0, 0, 16));
+    drop(eager);
+    assert!(
+        weak.upgrade().is_none(),
+        "disabling releases the copy after active reads finish"
+    );
+    configure(false, false).unwrap();
     let before = reads();
     let mut pixel_out = 0u16;
     // SAFETY: Native reader and two writable output bytes.
@@ -117,6 +135,18 @@ fn mapped_reads_match_native_pixels_rectangles_edges_and_lifecycle() {
     drop(reader);
     assert!(SESSION.lock().unwrap().as_ref().unwrap().streams.is_empty());
     stop().unwrap();
-    start(host(), &game).unwrap();
+    start_bindings(host(), &game).unwrap();
+    configure(false, true).unwrap();
+    let eager = Arc::downgrade(
+        SESSION
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .gigacache
+            .as_ref()
+            .unwrap(),
+    );
     stop().unwrap();
+    assert!(eager.upgrade().is_none(), "shutdown releases Gigacache");
 }

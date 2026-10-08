@@ -1,9 +1,7 @@
 //! Color-grading policy and its declarative menu controls.
 #![forbid(unsafe_code)]
 use crate::native;
-use rekenshi_plugin_api::{HostV1, OK};
 use rekenshi_plugin_sdk::{Context, Control, Plugin, Setting, Settings, Value};
-use std::path::Path;
 #[derive(Default, Debug)]
 pub struct ColorGrade {
     effect: Option<rekenshi_plugin_sdk::PostProcess>,
@@ -57,20 +55,17 @@ impl Plugin for ColorGrade {
     fn title(&self) -> &'static str {
         "Graphics"
     }
-    fn requires(&self) -> &'static [&'static str] {
-        &["graphics"]
-    }
     fn settings(&self) -> &'static [Setting] {
         SETTINGS
     }
-    fn start(
+    fn register(
         &mut self,
         context: &Context,
         settings: &Settings,
     ) -> Result<(), rekenshi_plugin_sdk::Error> {
-        self.update(context, settings)
+        self.settings_changed(context, settings)
     }
-    fn update(
+    fn settings_changed(
         &mut self,
         context: &Context,
         settings: &Settings,
@@ -118,19 +113,5 @@ impl Plugin for ColorGrade {
         }
         self.effect = None;
         Ok(())
-    }
-}
-pub fn start_legacy(host: HostV1, root: &Path) -> Result<(), rekenshi_plugin_sdk::Error> {
-    native::initialize(
-        host,
-        rekenshi_native::settings(&root.join("color-grade.toml"))?,
-    )
-    .map_err(rekenshi_plugin_sdk::Error::from)
-}
-pub fn stop() -> Result<(), rekenshi_plugin_sdk::Error> {
-    if native::stop() == OK {
-        Ok(())
-    } else {
-        Err("color grading shutdown failed".into())
     }
 }

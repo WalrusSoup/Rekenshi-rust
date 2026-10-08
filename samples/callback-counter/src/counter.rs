@@ -33,12 +33,12 @@ impl Plugin for CallbackCounter {
             control: Control::Toggle,
         }]
     }
-    fn start(
+    fn install(
         &mut self,
         context: &Context,
         settings: &Settings,
     ) -> Result<(), rekenshi_plugin_sdk::Error> {
-        self.update(context, settings)?;
+        self.settings_changed(context, settings)?;
         context.host.hook_ogre_calls(|| {
             if ENABLED.load(Ordering::Relaxed) {
                 CALLS.fetch_add(1, Ordering::Relaxed);
@@ -54,7 +54,7 @@ impl Plugin for CallbackCounter {
         }
         Ok(())
     }
-    fn update(
+    fn settings_changed(
         &mut self,
         _: &Context,
         settings: &Settings,

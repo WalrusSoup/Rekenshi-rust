@@ -193,6 +193,12 @@ extern "C" fn update_hook(player: usize) {
             return;
         }
         let _ = std::panic::catch_unwind(|| super::tick(player));
+        // The original player update and queued operations have completed.
+        // Deliver pending observations only, without exposing a public tick.
+        let _ = std::panic::catch_unwind(|| {
+            crate::internal_plugins::dispatch_lifecycle();
+            crate::extensions::dispatch_lifecycle();
+        });
         active.set(false);
     });
 }

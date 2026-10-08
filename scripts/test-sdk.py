@@ -79,7 +79,7 @@ def child(folder):
     getter(); assert counter.rekenshi_counter_calls()==before+1
     host.dllStopPlugin(); native.menu_shutdown()
     log=(folder/'RE_Kenshi_Rust.log').read_text()
-    assert 'post-tonemap effect registered' in log
+    assert 'owned post-tonemap effect policy registered' in log
     print('PASS: folder discovery, two independent SDK DLLs, Ogre/UI callbacks, original forwarding, graphics updates/removal, isolated settings, validation and restart')
 
 if __name__=='__main__':

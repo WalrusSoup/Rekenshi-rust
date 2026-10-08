@@ -130,7 +130,7 @@ pub struct Position {
 }
 /// UTF-8 bytes with explicit length; truncation must preserve character boundaries.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Text {
     /// Number of initialized UTF-8 bytes; must not exceed the buffer capacity.
     pub len: u32,
@@ -162,7 +162,7 @@ impl Text {
     }
 }
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 /// Combat and attribute readings supported by the native adapter.
 pub struct Stats {
     /// Strength reading from the current character snapshot.
@@ -179,7 +179,7 @@ pub struct Stats {
     pub melee_defence: f32,
 }
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 /// Medical readings with explicit per-field availability.
 pub struct Health {
     /// Per-field HEALTH_* validity, accommodating different race anatomies.
@@ -204,7 +204,7 @@ pub struct Health {
     pub right_leg: f32,
 }
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 /// C-layout character snapshot with validity and state bit masks.
 pub struct CharacterV1 {
     /// World-scoped character receiving this command or represented by this record.

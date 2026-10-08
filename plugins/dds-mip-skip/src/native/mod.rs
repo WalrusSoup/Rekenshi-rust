@@ -1,3 +1,4 @@
+use rekenshi_plugin_sdk::adapters::{self, AdapterOperations};
 mod plan;
 use crate::ogre::{self, Shared};
 use detour::{RawDetour, Threads, Transaction};
@@ -20,8 +21,11 @@ struct State {
 }
 static STATE: OnceLock<State> = OnceLock::new();
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static OPERATIONS: std::sync::RwLock<Option<AdapterOperations>> = std::sync::RwLock::new(None);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static SKIPPED: AtomicU64 = AtomicU64::new(0);
+static POLICY: std::sync::RwLock<Option<rekenshi_plugin_sdk::policies::PolicyProvider>> =
+    std::sync::RwLock::new(None);
 pub(super) fn start(host: HostV1, game: &Path) -> Result<(), String> {
     ogre::initialize(game)?;
     let base = ogre::game_module(game)?;
@@ -48,13 +52,24 @@ pub(super) fn start(host: HostV1, game: &Path) -> Result<(), String> {
     // SAFETY: Outside DllMain, suspend threads during the patch. State is pinned.
     unsafe { tx.commit(Threads::All) }.map_err(|e| e.to_string())?;
     ACTIVE.store(true, Ordering::Release);
+    *OPERATIONS.write().map_err(|_| "operation registry lock")? = Some(AdapterOperations::publish(host, "Existing adapter fingerprint and native signatures validated before hook enable; see implementation inventory and adapter source for evidence limits", &[(adapters::DDS_MIPS,"rekenshi.u32-le@1",4)]).map_err(|e| e.to_string())?);
+    *POLICY.write().map_err(|_| "DDS policy lock")? = rekenshi_plugin_sdk::policies::PolicyProvider::optional(host, rekenshi_plugin_sdk::policies::DDS,
+        "Kenshi 1.0.68 hash-gated DDSListener resourceStreamOpened 82ddc0; native SharedPtr stream replacement; unknown DDS layouts preserve original").map_err(|e| e.to_string())?;
     host.write_log("dds-mip-skip: native 1.0.68 loading listener verified");
     Ok(())
 }
-pub(super) fn set_enabled(value: bool) {
-    ENABLED.store(value, Ordering::Release);
-}
+
 pub(super) fn stop() -> Result<(), String> {
+    if let Some(mut operations) = OPERATIONS
+        .write()
+        .map_err(|_| "operation registry lock")?
+        .take()
+    {
+        operations.revoke().map_err(|e| e.to_string())?;
+    }
+    if let Some(mut policy) = POLICY.write().map_err(|_| "DDS policy lock")?.take() {
+        policy.revoke().map_err(|e| e.to_string())?;
+    }
     ACTIVE.store(false, Ordering::Release);
     ENABLED.store(false, Ordering::Release);
     if let Some(state) = STATE.get() {
@@ -80,9 +95,36 @@ unsafe extern "C-unwind" fn opened(
     // trampoline has the identical member ABI and allows native exception unwind.
     unsafe {
         let original: Opened = std::mem::transmute(state.hook.trampoline());
-        if ACTIVE.load(Ordering::Acquire) && ENABLED.load(Ordering::Acquire) && !stream.is_null() {
+        let policy = POLICY
+            .read()
+            .ok()
+            .and_then(|p| p.as_ref().map(|p| p.values([0., -1., 0., 0.])));
+        let enabled = policy.map_or_else(|| ENABLED.load(Ordering::Acquire), |p| p[0] == 1.)
+            || OPERATIONS
+                .read()
+                .ok()
+                .is_some_and(|o| o.as_ref().is_some_and(|o| o.active(adapters::DDS_MIPS)));
+        if ACTIVE.load(Ordering::Acquire) && enabled && !stream.is_null() {
             if let (Some(name), Some(group)) = (ogre::string(name), ogre::string(group)) {
-                let dropped = plan::levels(&name, &group, *(state.quality as *const i32));
+                let dropped = policy
+                    .filter(|p| (0. ..=16.).contains(&p[1]) && p[1].fract() == 0.)
+                    .map_or_else(
+                        || plan::levels(&name, &group, *(state.quality as *const i32)),
+                        |p| p[1] as u32,
+                    );
+                let metadata = [name.as_slice(), &[0], group.as_slice()].concat();
+                let dropped = OPERATIONS
+                    .read()
+                    .ok()
+                    .and_then(|o| {
+                        o.as_ref().and_then(|o| {
+                            o.transform(adapters::DDS_MIPS, &metadata, &dropped.to_le_bytes())
+                        })
+                    })
+                    .and_then(|b| <[u8; 4]>::try_from(b.as_slice()).ok())
+                    .map(u32::from_le_bytes)
+                    .filter(|v| *v <= 16)
+                    .unwrap_or(dropped);
                 if dropped > 0 && optimize(&mut *stream, dropped).is_ok() {
                     return;
                 }

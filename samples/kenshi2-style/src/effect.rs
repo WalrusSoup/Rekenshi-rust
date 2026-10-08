@@ -116,20 +116,17 @@ impl Plugin for Kenshi2Style {
     fn title(&self) -> &'static str {
         "Sample: Kenshi 2 style"
     }
-    fn requires(&self) -> &'static [&'static str] {
-        &["graphics"]
-    }
     fn settings(&self) -> &'static [Setting] {
         SETTINGS
     }
-    fn start(
+    fn register(
         &mut self,
         context: &Context,
         settings: &Settings,
     ) -> Result<(), rekenshi_plugin_sdk::Error> {
-        self.update(context, settings)
+        self.settings_changed(context, settings)
     }
-    fn update(
+    fn settings_changed(
         &mut self,
         context: &Context,
         settings: &Settings,

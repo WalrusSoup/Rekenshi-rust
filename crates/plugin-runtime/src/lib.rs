@@ -21,6 +21,7 @@ mod error;
 #[doc(inline)]
 pub use error::Error;
 mod host;
+pub mod platform;
 #[doc(inline)]
 pub use host::{Hook, HookEvents, Host, Logger};
 
@@ -153,11 +154,62 @@ pub trait Plugin: Send {
     fn settings(&self) -> &'static [Setting] {
         &[]
     }
+    /// Register desired behavior before any native provider in this composition starts.
+    ///
+    /// Do not assume native resources exist. Failure is cleaned by stop, and
+    /// prevents this plugin from starting. Independent DLLs use this same phase.
+    fn register(&mut self, _context: &Context, _settings: &Settings) -> Result<(), Error> {
+        Ok(())
+    }
     /// Prepare native resources once. On failure, stop cleans partial preparation.
-    fn start(&mut self, context: &Context, settings: &Settings) -> Result<(), Error>;
+    fn start(&mut self, _context: &Context, _settings: &Settings) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Activate providers/resources after the desired-registration barrier commits.
+    ///
+    /// Existing implementations of start remain supported through this default.
+    fn install(&mut self, context: &Context, settings: &Settings) -> Result<(), Error> {
+        self.start(context, settings)
+    }
+    /// Name capability/lifecycle contracts to observe on the serial plugin lane.
+    ///
+    /// Missing providers remain pending. Names alone never establish native support.
+    fn lifecycle_contracts(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// Domain occurrences to deliver later on ordinary serialized plugin state.
+    fn event_contracts(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// React to a copied occurrence, never to elapsed time or a generic update.
+    /// World/resource identifiers in the payload may already have been invalidated.
+    fn event(
+        &mut self,
+        _context: &Context,
+        _name: &str,
+        _event: &rekenshi_plugin_api::platform::EventV1,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Receive a copied provider generation transition at an eligible game dispatch point.
+    ///
+    /// READY does not grant native pointers or guarantee before-first-use ordering.
+    /// Delayed REVOKED delivery never prolongs a native resource's lifetime.
+    fn lifecycle_changed(
+        &mut self,
+        _context: &Context,
+        _name: &str,
+        _status: rekenshi_plugin_api::platform::StatusV1,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
     /// Apply a complete validated snapshot. An error must preserve the old state.
     fn update(&mut self, _context: &Context, _settings: &Settings) -> Result<(), Error> {
         Ok(())
+    }
+    /// Apply validated settings, independently of native frames or simulation updates.
+    fn settings_changed(&mut self, context: &Context, settings: &Settings) -> Result<(), Error> {
+        self.update(context, settings)
     }
     /// Quiesce resources; called in reverse composition order, including failed starts.
     fn stop(&mut self) -> Result<(), Error> {
@@ -196,6 +248,19 @@ impl Plugins {
     pub fn start<H: Into<Host>>(
         self,
         root: PathBuf,
+        host: impl FnMut(&str, u64) -> Result<H, Error>,
+    ) -> Result<Runtime, Error> {
+        let mut runtime = self.prepare(root, host)?;
+        runtime.install()?;
+        Ok(runtime)
+    }
+    /// Commit desired registrations without enabling native providers.
+    ///
+    /// # Errors
+    /// Rejects invalid composition/settings or host connection failures.
+    pub fn prepare<H: Into<Host>>(
+        mut self,
+        root: PathBuf,
         mut host: impl FnMut(&str, u64) -> Result<H, Error>,
     ) -> Result<Runtime, Error> {
         Host::check_shutdown()?;
@@ -206,52 +271,91 @@ impl Plugins {
             .unwrap_or_else(|| root.join("modpack.toml"));
         let settings = read_settings(&path, &schema)?;
         let mut mounted: Vec<Mounted> = Vec::new();
-        for (i, mut plugin) in self.plugins.into_iter().enumerate() {
+        let mut prepared = Vec::with_capacity(self.plugins.len());
+        for (i, plugin) in self.plugins.iter_mut().enumerate() {
             let context = match host(plugin.id(), 1001 + i as u64) {
                 Ok(host) => Context {
                     host: host.into(),
                     root: root.clone(),
                 },
                 Err(e) => {
-                    for item in &mounted {
-                        item.context.host.shutdown()?;
+                    for (context, _) in &prepared {
+                        let context: &Context = context;
+                        context.host.shutdown()?;
                     }
-                    for item in mounted.iter_mut().rev() {
-                        let _ = item.plugin.stop();
+                    for plugin in self.plugins[..i].iter_mut().rev() {
+                        let _ = plugin.stop();
                     }
                     return Err(e);
                 }
             };
-            let blocked = plugin.requires().iter().find(|id| {
-                !self.provided.contains(id)
-                    && !mounted
-                        .iter()
-                        .any(|item| item.plugin.id() == **id && item.error.is_none())
-            });
-            let result = match blocked {
-                Some(id) => Err(format!("requires unavailable plugin {id}").into()),
-                None => plugin.start(&context, &settings),
-            };
-            let error = result.err().map(|e| {
-                context.log(&format!("plugin {} unavailable: {e}", plugin.id()));
-                if let Err(cleanup) = context.host.shutdown() {
-                    context.log(&format!("callback cleanup failed: {cleanup}"));
+            let result = (|| {
+                plugin.register(&context, &settings)?;
+                let mut watches = Vec::new();
+                if !plugin.lifecycle_contracts().is_empty() {
+                    let platform = context
+                        .host
+                        .native()
+                        .platform()
+                        .map_err(|code| Error::host("platform", code))?;
+                    for name in plugin.lifecycle_contracts() {
+                        watches.push((
+                            *name,
+                            platform
+                                .watch(name)
+                                .map_err(|code| Error::host("platform", code))?,
+                        ));
+                    }
                 }
-                if let Err(cleanup) = plugin.stop() {
+                let mut events = Vec::new();
+                if !plugin.event_contracts().is_empty() {
+                    let platform = context
+                        .host
+                        .native()
+                        .platform()
+                        .map_err(|code| Error::host("platform events", code))?;
+                    for name in plugin.event_contracts() {
+                        events.push((
+                            *name,
+                            platform
+                                .watch_events(name)
+                                .map_err(|code| Error::host("platform events", code))?,
+                        ));
+                    }
+                }
+                Ok::<_, Error>((watches, events))
+            })();
+            if result.is_err() {
+                // Failed desired registrations must not become active when an
+                // earlier provider starts at the installation barrier.
+                if let Err(error) = context.host.shutdown() {
+                    context.log(&format!("registration callback cleanup failed: {error}"));
+                }
+                if let Err(error) = plugin.stop() {
                     context.log(&format!(
-                        "plugin cleanup failed; resources retained: {cleanup}"
+                        "registration cleanup failed; resources retained: {error}"
                     ));
                 }
-                e.to_string()
-            });
+            }
+            prepared.push((context, result));
+        }
+        for (plugin, (context, prepared)) in self.plugins.into_iter().zip(prepared) {
+            let (watches, events, error) = match prepared {
+                Ok((watches, events)) => (watches, events, None),
+                Err(error) => (Vec::new(), Vec::new(), Some(error.to_string())),
+            };
             mounted.push(Mounted {
                 plugin,
                 context,
                 error,
+                watches,
+                events,
             });
         }
         Ok(Runtime {
             mounted,
+            installed: false,
+            provided: self.provided,
             schema,
             settings,
             path,
@@ -329,6 +433,8 @@ struct Mounted {
     plugin: Box<dyn Plugin>,
     context: Context,
     error: Option<String>,
+    watches: Vec<(&'static str, rekenshi_plugin_api::platform::Watch)>,
+    events: Vec<(&'static str, rekenshi_plugin_api::platform::EventWatch)>,
 }
 #[derive(Clone, Debug)]
 /// Owned menu row containing a setting value and plugin availability.
@@ -345,6 +451,8 @@ pub struct Row {
 /// Mounted plugin composition with validated settings and reverse-order cleanup.
 pub struct Runtime {
     mounted: Vec<Mounted>,
+    installed: bool,
+    provided: Vec<&'static str>,
     schema: Vec<Setting>,
     settings: Settings,
     path: PathBuf,
@@ -358,21 +466,62 @@ impl Drop for Runtime {
     }
 }
 impl Runtime {
+    /// Enable providers after the host has prepared every participating composition.
+    ///
+    /// # Errors
+    /// Rejects duplicate installation and forbidden shutdown lanes. Individual
+    /// plugin failures are logged and reflected in availability, with cleanup.
+    pub fn install(&mut self) -> Result<(), Error> {
+        Host::check_shutdown()?;
+        if self.installed {
+            return Err("composition already installed".into());
+        }
+        let mut active = self.provided.clone();
+        for item in &mut self.mounted {
+            if item.error.is_some() {
+                continue;
+            }
+            let blocked = item
+                .plugin
+                .requires()
+                .iter()
+                .find(|id| !active.contains(id));
+            let result = match blocked {
+                Some(id) => Err(format!("requires unavailable plugin {id}").into()),
+                None => item.plugin.install(&item.context, &self.settings),
+            };
+            if let Err(error) = result {
+                item.context
+                    .log(&format!("plugin {} unavailable: {error}", item.plugin.id()));
+                item.context.host.shutdown()?;
+                if let Err(cleanup) = item.plugin.stop() {
+                    item.context.log(&format!(
+                        "plugin cleanup failed; resources retained: {cleanup}"
+                    ));
+                }
+                item.error = Some(error.to_string());
+            } else {
+                active.push(item.plugin.id());
+            }
+        }
+        self.installed = true;
+        Ok(())
+    }
     /// Copy the mounted plugin identifiers in composition order.
     pub fn ids(&self) -> Vec<&'static str> {
         self.mounted.iter().map(|m| m.plugin.id()).collect()
     }
     /// Report whether a mounted plugin started successfully and remains unquarantined.
     pub fn available(&self, id: &str) -> bool {
-        self.mounted
-            .iter()
-            .any(|m| m.plugin.id() == id && m.error.is_none() && !m.context.host.faulted())
+        self.mounted.iter().any(|m| {
+            self.installed && m.plugin.id() == id && m.error.is_none() && !m.context.host.faulted()
+        })
     }
     /// Count successfully started plugins whose callback groups remain healthy.
     pub fn active_count(&self) -> usize {
         self.mounted
             .iter()
-            .filter(|m| m.error.is_none() && !m.context.host.faulted())
+            .filter(|m| self.installed && m.error.is_none() && !m.context.host.faulted())
             .count()
     }
     /// Copy current menu values and availability diagnostics for all declared settings.
@@ -424,7 +573,7 @@ impl Runtime {
         }
         let mut next = self.settings.clone();
         next.values.insert(key.to_owned(), value);
-        item.plugin.update(&item.context, &next)?;
+        item.plugin.settings_changed(&item.context, &next)?;
         let result = (|| {
             let text = toml::to_string_pretty(&File {
                 schema_version: 1,
@@ -435,7 +584,7 @@ impl Runtime {
             std::fs::rename(&pending, &self.path).map_err(Error::from)
         })();
         if let Err(error) = result {
-            if let Err(rollback) = item.plugin.update(&item.context, &self.settings) {
+            if let Err(rollback) = item.plugin.settings_changed(&item.context, &self.settings) {
                 item.error = Some(format!("settings rollback failed: {rollback}"));
                 return Err(format!("save failed: {error}; rollback failed: {rollback}").into());
             }
@@ -457,6 +606,8 @@ impl Runtime {
         }
         let mut errors = Vec::new();
         for item in self.mounted.iter_mut().rev() {
+            item.watches.clear();
+            item.events.clear();
             if let Err(e) = item.plugin.stop() {
                 errors.push(format!("{}: {e}", item.plugin.id()));
             }
@@ -466,6 +617,81 @@ impl Runtime {
         } else {
             Err(errors.join("; ").into())
         }
+    }
+
+    /// Deliver only pending lifecycle transitions at the host's verified game-lane point.
+    ///
+    /// This is host infrastructure, not a plugin tick. Each owner receives at
+    /// most 64 transitions per dispatch; mutable plugin state stays serialized.
+    ///
+    /// # Errors
+    /// Quarantines failed observers and requests restart after a panic or overflow.
+    pub fn dispatch_lifecycle(&mut self) -> Result<(), Error> {
+        if !self.installed {
+            return Ok(());
+        }
+        let mut failure = None;
+        for item in &mut self.mounted {
+            if item.error.is_some() {
+                continue;
+            }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if item.context.host.faulted() {
+                    return Err(Error::restart_required());
+                }
+                let mut budget = 64;
+                for (name, watch) in &item.watches {
+                    while budget != 0 {
+                        let Some(status) = watch
+                            .next_transition()
+                            .map_err(|code| Error::host("platform lifecycle", code))?
+                        else {
+                            break;
+                        };
+                        budget -= 1;
+                        item.plugin.lifecycle_changed(&item.context, name, status)?;
+                    }
+                }
+                for (name, watch) in &item.events {
+                    while budget != 0 {
+                        let Some(event) = watch
+                            .next_event()
+                            .map_err(|code| Error::host("platform event", code))?
+                        else {
+                            break;
+                        };
+                        budget -= 1;
+                        item.plugin.event(&item.context, name, &event)?;
+                    }
+                }
+                Ok::<_, Error>(())
+            }));
+            let error = match result {
+                Ok(Ok(())) => continue,
+                Ok(Err(error)) => error,
+                Err(payload) => {
+                    std::mem::forget(payload);
+                    Error::restart_required()
+                }
+            };
+            item.context.log(&format!(
+                "lifecycle observer disabled; restart required: {error}"
+            ));
+            item.error = Some(error.to_string());
+            if let Ok(platform) = item.context.host.native().platform() {
+                (platform.api().quarantine)(platform.token());
+            }
+            item.context.host.shutdown()?;
+            if let Err(cleanup) = item.plugin.stop() {
+                item.context.log(&format!(
+                    "failed observer cleanup retained resources: {cleanup}"
+                ));
+            }
+            item.watches.clear();
+            item.events.clear();
+            failure = Some(error);
+        }
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -755,6 +981,30 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
+    }
+
+    #[test]
+    fn callback_fault_retires_owner_at_serial_dispatch_without_pending_events() {
+        let events = HookEvents::default();
+        events.set_available(Hook::OgreCalls, true);
+        let history = Arc::default();
+        let mut runtime = Plugins::new()
+            .register(plugin("faulted", &history))
+            .start(folder(), |id, token| {
+                host(id, token).map(|raw| Host::new(raw, events.clone()))
+            })
+            .unwrap();
+        runtime.mounted[0]
+            .context
+            .host
+            .hook_ogre_calls(|| panic!("callback failed"))
+            .unwrap();
+        assert_eq!(events.dispatch_ogre_calls(), 1);
+        assert!(runtime.dispatch_lifecycle().is_err());
+        assert!(runtime.mounted[0].error.is_some());
+        assert_eq!(*history.lock().unwrap(), ["start faulted", "stop faulted"]);
+        assert!(runtime.dispatch_lifecycle().is_ok());
+        assert_eq!(*history.lock().unwrap(), ["start faulted", "stop faulted"]);
     }
 
     #[test]

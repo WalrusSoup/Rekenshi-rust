@@ -6,6 +6,7 @@ use crate::{
 use detour::{RawDetour, Threads, Transaction};
 use rekenshi_native::symbols::ogre::{archive, codec, file_system_archive};
 use rekenshi_plugin_api::HostV1;
+use rekenshi_plugin_sdk::adapters::{self, AdapterOperations};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,12 +28,77 @@ struct State {
 static STATE: OnceLock<State> = OnceLock::new();
 static ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
 static ENABLED: AtomicBool = AtomicBool::new(false);
+static POLICY: std::sync::RwLock<Option<rekenshi_plugin_sdk::policies::PolicyProvider>> =
+    std::sync::RwLock::new(None);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static OPERATIONS: std::sync::RwLock<Option<AdapterOperations>> = std::sync::RwLock::new(None);
 static DECODED: AtomicU64 = AtomicU64::new(0);
 static SIDECARS: AtomicU64 = AtomicU64::new(0);
 #[repr(C)]
 struct Codec {
     table: &'static CodecTable,
+    extension: [u8; 16],
+    magic: [u8; 16],
+    magic_len: usize,
+}
+impl Codec {
+    fn new(extension: &[u8], magic: &[u8]) -> Self {
+        let mut codec = Self {
+            table: &TABLE,
+            extension: [0; 16],
+            magic: [0; 16],
+            magic_len: magic.len(),
+        };
+        codec.extension[..extension.len()].copy_from_slice(extension);
+        codec.magic[..magic.len()].copy_from_slice(magic);
+        codec
+    }
+    fn extension(&self) -> &[u8] {
+        &self.extension[..self.extension.iter().position(|b| *b == 0).unwrap_or(16)]
+    }
+}
+struct CodecProviders {
+    claims: rekenshi_plugin_sdk::operations::Provider,
+    decode: rekenshi_plugin_sdk::operations::Provider,
+    objects: Vec<usize>,
+}
+static CODECS: std::sync::RwLock<Option<CodecProviders>> = std::sync::RwLock::new(None);
+fn publish_codecs(host: HostV1, state: &State) -> Result<(), String> {
+    use rekenshi_plugin_sdk::{
+        codecs,
+        operations::{Contract, Operations},
+    };
+    let operations = Operations::from_host(host).map_err(|e| e.to_string())?;
+    let claims=operations.publish(Contract::new(codecs::CLAIMS,"rekenshi.codec-declarations@1",
+        "Preparation only; declarations consumed before native loads; late declarations require restart",
+        "Fingerprint-gated Ogre Codec registry and inspected virtual table; native thunks pinned until provider shutdown",4096).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let decode=operations.publish(Contract::new(codecs::DECODE,"rekenshi.codec-image-le@1",
+        "Synchronous resource loader; copied encoded input and validated image result; no native pointers",
+        "Ogre native MemoryDataStream/ImageData allocations and shared ownership; dimensions and pixel length checked before native commit",16*1024*1024).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let declarations = claims
+        .dispatch(&[], &[])
+        .and_then(|bytes| codecs::declarations(&bytes))
+        .map_err(|e| e.to_string())?;
+    // Check every conflict before changing Ogre's registry.
+    for (extension, _) in &declarations {
+        // SAFETY: Native API borrows this bounded short string synchronously.
+        if unsafe { (state.registered)(&NativeString::short(extension.as_bytes())) } {
+            return Err(format!("codec extension already registered: {extension}"));
+        }
+    }
+    let mut objects = Vec::new();
+    for (extension, magic) in declarations {
+        let object = Box::into_raw(Box::new(Codec::new(extension.as_bytes(), &magic))) as usize;
+        // SAFETY: Registry borrows the pinned native vtable object; lifetime retained beyond shutdown.
+        unsafe { (state.register)(object) };
+        objects.push(object);
+    }
+    *CODECS.write().map_err(|_| "codec provider lock")? = Some(CodecProviders {
+        claims,
+        decode,
+        objects,
+    });
+    Ok(())
 }
 #[repr(C)]
 struct CodecTable {
@@ -77,7 +143,7 @@ pub(super) fn start(host: HostV1, game: &Path) -> Result<(), String> {
                 hook: RawDetour::new(target as _, archive_open as *const ())
                     .map_err(|e| e.to_string())?,
                 target,
-                codec: Box::into_raw(Box::new(Codec { table: &TABLE })) as usize,
+                codec: Box::into_raw(Box::new(Codec::new(b"sic", b"ShIt"))) as usize,
                 register: std::mem::transmute::<*const c_void, Register>(rekenshi_native::export(
                     base,
                     codec::REGISTER_CODEC,
@@ -113,13 +179,38 @@ pub(super) fn start(host: HostV1, game: &Path) -> Result<(), String> {
     // borrows this pinned object and never owns its Rust allocation.
     unsafe { (state.register)(state.codec) };
     ACTIVE.store(true, Ordering::Release);
-    host.write_log("compressed-textures: SIC codec mounted; converted TGA sidecars supported");
+    *OPERATIONS.write().map_err(|_| "operation registry lock")? = Some(AdapterOperations::publish(host, "Existing adapter fingerprint and native signatures validated before hook enable; see implementation inventory and adapter source for evidence limits", &[(adapters::TEXTURE_SELECT,"rekenshi.utf8-path@1",8192),(adapters::TEXTURE_DECODE,"rekenshi.image-pixels@1",16777216)]).map_err(|e| e.to_string())?);
+    *POLICY.write().map_err(|_| "texture policy lock")? = rekenshi_plugin_sdk::policies::PolicyProvider::optional(host, rekenshi_plugin_sdk::policies::TEXTURES,
+        "Fingerprint-gated Ogre FileSystemArchive::open and SIC codec registry; sidecars validate source stamp and decoded size; native-owned replacement streams").map_err(|e| e.to_string())?;
+    publish_codecs(host, state)?;
+    host.write_log("compressed-textures: SIC codec mounted; public codec declarations activated");
     Ok(())
 }
-pub(super) fn set_enabled(value: bool) {
-    ENABLED.store(value, Ordering::Release);
-}
+
 pub(super) fn stop() -> Result<(), String> {
+    let mut codecs = CODECS.write().map_err(|_| "codec provider lock")?;
+    if let Some(providers) = codecs.as_mut() {
+        providers.decode.revoke().map_err(|e| e.to_string())?;
+        providers.claims.revoke().map_err(|e| e.to_string())?;
+        if let Some(state) = STATE.get() {
+            for object in &providers.objects {
+                // SAFETY: Native loading is quiescent at provider shutdown; retain object allocation.
+                unsafe { (state.unregister)(*object) };
+            }
+        }
+    }
+    *codecs = None;
+    drop(codecs);
+    if let Some(mut operations) = OPERATIONS
+        .write()
+        .map_err(|_| "operation registry lock")?
+        .take()
+    {
+        operations.revoke().map_err(|e| e.to_string())?;
+    }
+    if let Some(mut policy) = POLICY.write().map_err(|_| "texture policy lock")?.take() {
+        policy.revoke().map_err(|e| e.to_string())?;
+    }
     ENABLED.store(false, Ordering::Release);
     if ACTIVE.swap(false, Ordering::AcqRel) {
         if let Some(state) = STATE.get() {
@@ -151,7 +242,36 @@ unsafe extern "C-unwind" fn archive_open(
     // SAFETY: Live archive and string arguments; native exceptions propagate
     // through C-unwind to the engine's own handler.
     unsafe {
-        if readonly && ACTIVE.load(Ordering::Acquire) && ENABLED.load(Ordering::Acquire) {
+        let selected = if readonly && ACTIVE.load(Ordering::Acquire) {
+            ogre::string(name)
+                .and_then(|filename| {
+                    let folder = ogre::string((state.archive_name)(this))?;
+                    OPERATIONS.read().ok()?.as_ref()?.transform(
+                        adapters::TEXTURE_SELECT,
+                        &folder,
+                        &filename,
+                    )
+                })
+                .filter(|v| {
+                    !v.is_empty()
+                        && !v.contains(&0)
+                        && std::str::from_utf8(v).ok().is_some_and(|s| {
+                            Path::new(s)
+                                .components()
+                                .all(|c| matches!(c, std::path::Component::Normal(_)))
+                        })
+                })
+        } else {
+            None
+        };
+        let selected_native = selected.as_deref().map(NativeString::borrowed);
+        let name = selected_native.as_ref().map_or(name, |s| s.as_ptr());
+        let enabled = POLICY
+            .read()
+            .ok()
+            .and_then(|p| p.as_ref().map(|p| p.values([0.; 4])[0] == 1.))
+            .unwrap_or_else(|| ENABLED.load(Ordering::Acquire));
+        if readonly && ACTIVE.load(Ordering::Acquire) && enabled {
             if let (Some(name), Some(folder)) =
                 (ogre::string(name), ogre::string((state.archive_name)(this)))
             {
@@ -202,10 +322,10 @@ fn sidecar(folder: &str, name: &str) -> Option<OwnedShared> {
 unsafe extern "C" fn destroy(this: *mut c_void, _: u32) -> *mut c_void {
     this
 }
-unsafe extern "C" fn get_type(_: *const c_void, output: *mut NativeString) -> *mut NativeString {
+unsafe extern "C" fn get_type(this: *const c_void, output: *mut NativeString) -> *mut NativeString {
     // SAFETY: Native caller supplies writable std::string sret storage.
     unsafe {
-        output.write(NativeString::short(b"sic"));
+        output.write(NativeString::short((&*this.cast::<Codec>()).extension()));
     }
     output
 }
@@ -216,9 +336,16 @@ unsafe extern "C" fn data_type(_: *const c_void, output: *mut NativeString) -> *
     }
     output
 }
-unsafe extern "C" fn magic_match(_: *const c_void, bytes: *const u8, len: usize) -> bool {
-    // SAFETY: Codec contract supplies len readable magic bytes.
-    !bytes.is_null() && len >= 4 && unsafe { std::slice::from_raw_parts(bytes, 4) == b"ShIt" }
+unsafe extern "C" fn magic_match(this: *const c_void, bytes: *const u8, len: usize) -> bool {
+    if this.is_null() || bytes.is_null() {
+        return false;
+    }
+    // SAFETY: Ogre borrows our pinned Codec and supplies len readable magic bytes.
+    unsafe {
+        let codec = &*this.cast::<Codec>();
+        len >= codec.magic_len
+            && std::slice::from_raw_parts(bytes, codec.magic_len) == &codec.magic[..codec.magic_len]
+    }
 }
 unsafe extern "C" fn magic_ext(
     this: *const c_void,
@@ -226,10 +353,10 @@ unsafe extern "C" fn magic_ext(
     bytes: *const u8,
     len: usize,
 ) -> *mut NativeString {
-    // SAFETY: Same magic contract; caller supplies native string return storage.
+    // SAFETY: Caller supplies writable native string return storage and our pinned codec.
     unsafe {
         output.write(NativeString::short(if magic_match(this, bytes, len) {
-            b"sic"
+            (&*this.cast::<Codec>()).extension()
         } else {
             b""
         }));
@@ -272,12 +399,18 @@ unsafe extern "C-unwind" fn native_error() -> ! {
     std::process::abort()
 }
 unsafe extern "C-unwind" fn decode(
-    _: *const c_void,
+    this: *const c_void,
     output: *mut DecodeResult,
     input: *mut Shared,
 ) -> *mut DecodeResult {
     // SAFETY: Native codec caller supplies valid stream reference and sret storage.
-    let result = unsafe { decode_image(&*input) };
+    let result = unsafe {
+        if (&*this.cast::<Codec>()).extension() == b"sic" {
+            decode_image(&*input)
+        } else {
+            decode_custom((&*this.cast::<Codec>()).extension(), &*input)
+        }
+    };
     match result {
         Ok(result) => {
             // SAFETY: Caller owns writable sret storage; references transfer to it.
@@ -295,6 +428,34 @@ unsafe extern "C-unwind" fn decode(
     }
     output
 }
+unsafe fn decode_custom(extension: &[u8], input: &Shared) -> Result<DecodeResult, String> {
+    // SAFETY: Native codec caller owns a live stream; checked byte bound precedes reads.
+    unsafe {
+        let size = ogre::stream_size(input)
+            .filter(|n| *n <= 16 * 1024 * 1024)
+            .ok_or("custom codec input too large")?;
+        let mut bytes = vec![0; size];
+        ogre::read(input, 0, &mut bytes)?;
+        let providers = CODECS.read().map_err(|_| "codec provider lock")?;
+        let providers = providers.as_ref().ok_or("codec provider revoked")?;
+        let result = providers
+            .decode
+            .dispatch(extension, &bytes)
+            .map_err(|e| e.to_string())?;
+        if result == bytes {
+            return Err("codec decoder revoked or absent".into());
+        }
+        let image =
+            rekenshi_plugin_sdk::codecs::Image::decode(&result).map_err(|e| e.to_string())?;
+        let api = ogre::initialize(Path::new("."))?;
+        let metadata = api.metadata(image.width, image.height, image.format, image.pixels.len())?;
+        let pixels = api.pixel_stream(&image.pixels)?;
+        Ok(DecodeResult {
+            pixels: pixels.into_raw(),
+            metadata: metadata.into_raw(),
+        })
+    }
+}
 unsafe fn decode_image(input: &Shared) -> Result<DecodeResult, String> {
     // SAFETY: Live codec stream, bounded size and hash-verified stream adapter.
     unsafe {
@@ -303,7 +464,22 @@ unsafe fn decode_image(input: &Shared) -> Result<DecodeResult, String> {
             .ok_or("SIC stream too large")?;
         let mut bytes = vec![0; size];
         ogre::read(input, 0, &mut bytes)?;
-        let image = sic::decode(&bytes)?;
+        let mut image = sic::decode(&bytes)?;
+        let metadata: Vec<_> = [image.width, image.height, image.format.ogre()]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        if let Some(pixels) = OPERATIONS
+            .read()
+            .ok()
+            .and_then(|o| {
+                o.as_ref()
+                    .and_then(|o| o.transform(adapters::TEXTURE_DECODE, &metadata, &image.pixels))
+            })
+            .filter(|p| p.len() == image.pixels.len())
+        {
+            image.pixels = pixels;
+        }
         let api = ogre::initialize(Path::new("."))?;
         let metadata = api.metadata(
             image.width,

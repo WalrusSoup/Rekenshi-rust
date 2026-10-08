@@ -6,6 +6,7 @@ import subprocess
 import sys
 import struct
 import uuid
+import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 def child(folder, game):
@@ -38,7 +39,7 @@ def child(folder, game):
                 release = C.c_void_p.from_address(table + 16).value
                 C.CFUNCTYPE(C.c_uint32, C.c_void_p)(release)(blob)
     host.dllStartPlugin()
-    assert host.rekenshi_status() == 1 and host.rekenshi_pack_layers() == 6
+    assert host.rekenshi_status() == 1 and host.rekenshi_pack_layers() == 7
     assert host.rekenshi_internal_plugins() == host.rekenshi_pack_layers()
     assert host.rekenshi_plugins_loaded() == 2
     startup_log = (folder / 'RE_Kenshi_Rust.log').read_text()
@@ -64,9 +65,16 @@ def child(folder, game):
         set_value('performance.heightmap_cache', 1, 1)
         assert read_pixel(reader, 17, 23, C.byref(output)) == 1 and output.value == 23*64+17
         assert host.rekenshi_heightmap_cache_reads() == before + 1
+        set_value('performance.heightmap_gigacache', 1, 1)
+        assert read_pixel(reader, 17, 23, C.byref(output)) == 1 and output.value == 23*64+17
+        assert host.rekenshi_heightmap_cache_reads() == before + 2
         set_value('performance.heightmap_cache', 1, 0)
         assert read_pixel(reader, 17, 23, C.byref(output)) == 1 and output.value == 23*64+17
-        assert host.rekenshi_heightmap_cache_reads() == before + 1
+        assert host.rekenshi_heightmap_cache_reads() == before + 3
+        set_value('performance.heightmap_gigacache', 1, 0)
+        before = host.rekenshi_heightmap_cache_reads()
+        assert read_pixel(reader, 17, 23, C.byref(output)) == 1 and output.value == 23*64+17
+        assert host.rekenshi_heightmap_cache_reads() == before
     finally:
         destroy(reader, 1)
     other = open_tiff(str(folder / 'data/newland/land/other.tif').encode(), 1)
@@ -81,11 +89,51 @@ def child(folder, game):
     finally:
         destroy(other, 1)
     set_value('performance.shader_cache', 1, 0)
+    # Exercise the actual host compiler detour, including cache-off operation
+    # and a failed injected compile falling back to the unchanged game source.
+    def expand_shader(path):
+        result = []
+        for line in path.read_bytes().splitlines(keepends=True):
+            match = re.fullmatch(rb'\s*#include "([^"]+)"\s*', line)
+            if match:
+                name = match[1].decode('ascii')
+                included = path.parent / name
+                if not included.is_file():
+                    included = game / 'data/materials/common' / name
+                result.append(expand_shader(included))
+            else:
+                result.append(line)
+        return b''.join(result)
+    lighting_source = expand_shader(game / 'data/materials/deferred/deferred.hlsl')
+    def compile_lighting(fail_patch=False):
+        data = (b'#define reBlocked missing.identifier\n' if fail_patch else b'') + lighting_source
+        code, errors = C.c_void_p(), C.c_void_p()
+        result = compile_shader(data, len(data), b'ssao-host-test', None, None,
+                                b'main_fs', b'ps_5_0', 1 << 12, 0, C.byref(code), C.byref(errors))
+        assert result == 0 and code.value, 'lighting compile/fallback failed'
+        table = C.c_void_p.from_address(code.value).value
+        pointer = C.CFUNCTYPE(C.c_void_p, C.c_void_p)(C.c_void_p.from_address(table + 24).value)(code)
+        size = C.CFUNCTYPE(C.c_size_t, C.c_void_p)(C.c_void_p.from_address(table + 32).value)(code)
+        tagged = b'REKenshiSsaoConstants\0' in C.string_at(pointer, size)
+        for blob in [code, errors]:
+            if blob.value:
+                table = C.c_void_p.from_address(blob.value).value
+                C.CFUNCTYPE(C.c_uint32, C.c_void_p)(C.c_void_p.from_address(table + 16).value)(blob)
+        assert tagged != fail_patch, 'source transform or original-shader fallback failed'
+    compile_lighting()
+    compile_lighting(fail_patch=True)
+    set_value('graphics.ssao', 1, 1)
+    set_value('graphics.ssao_strength', 2, 0.6)
+    set_value('graphics.ssao_radius', 2, 1.5)
+    set_value('graphics.ssao_debug', 2, 1)
+    set_value('graphics.ssao', 1, 0)
     hits = host.rekenshi_shader_cache_hits()
     compile()
     compile()
     assert host.rekenshi_shader_cache_hits() == hits
     set_value('performance.shader_cache', 1, 1)
+    compile_lighting()
+    hits = host.rekenshi_shader_cache_hits()
     compile()
     assert host.rekenshi_shader_cache_hits() == hits + 1
     # Retired effects are absent; the disabled sample can be enabled live.
@@ -112,11 +160,22 @@ def child(folder, game):
     sample_config = folder / 'RE_Kenshi_Rust/settings/kenshi2-style.toml'
     sample_saved = sample_config.read_bytes()
     assert b'\"samples.kenshi2_style\" = true' in sample_saved
+    set_value('performance.heightmap_gigacache', 1, 1)
+    saved = config.read_bytes()
+    assert b'"performance.heightmap_gigacache" = true' in saved
     host.dllStopPlugin()
     assert host.rekenshi_pack_layers() == 0
     assert host.rekenshi_internal_plugins() == 0
     host.dllStartPlugin()
-    assert host.rekenshi_pack_layers() == 6 and config.read_bytes() == saved and sample_config.read_bytes() == sample_saved
+    assert host.rekenshi_pack_layers() == 7 and config.read_bytes() == saved and sample_config.read_bytes() == sample_saved
+    reader = open_tiff(str(folder / 'data/newland/land/fullmap.tif').encode(), 1)
+    assert reader
+    try:
+        before = host.rekenshi_heightmap_cache_reads()
+        assert read_pixel(reader, 17, 23, C.byref(output)) == 1 and output.value == 23*64+17
+        assert host.rekenshi_heightmap_cache_reads() == before + 1
+    finally:
+        destroy(reader, 1)
     host.dllStopPlugin()
     print('PASS: single-DLL internal plugins, live shader/heightmap/sample style controls, availability, persistence, validation, compatibility aliases, stop/restart')
 

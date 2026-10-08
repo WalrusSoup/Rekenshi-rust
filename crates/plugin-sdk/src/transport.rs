@@ -17,6 +17,12 @@ struct Dispatch {
     kind: u32,
 }
 impl Connection {
+    pub(crate) fn refresh_supports(&self) {
+        self.events
+            .set_available(Hook::OgreCalls, (self.api.supports)(OGRE_CALLS));
+        self.events
+            .set_available(Hook::UiFrame, (self.api.supports)(UI_FRAME));
+    }
     pub(crate) fn new(host: HostV1) -> Result<Arc<Self>, crate::Error> {
         let address = host
             .find_export(c"RE_Kenshi_Rust.dll", c"rekenshi_services_api")

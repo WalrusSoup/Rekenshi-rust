@@ -4,6 +4,7 @@ use crate::palette::{self, Colour};
 use detour::{Transaction, TypedDetour};
 use rekenshi_native::symbols::mygui::{edit_text, resource_skin, skin_item, widget};
 use rekenshi_plugin_runtime::Error;
+use rekenshi_plugin_sdk::adapters::{self, AdapterOperations};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_void};
@@ -45,12 +46,101 @@ static HOOKS: OnceLock<Hooks> = OnceLock::new();
 // A single atomic snapshot makes enabling and brightness updates coherent.
 static CONFIG: AtomicU64 = AtomicU64::new(0.6_f32.to_bits() as u64); // disabled
 static EPOCH: AtomicU64 = AtomicU64::new(1);
+static POLICY: std::sync::RwLock<Option<rekenshi_plugin_sdk::policies::PolicyProvider>> =
+    std::sync::RwLock::new(None);
+static OPERATIONS: std::sync::RwLock<Option<AdapterOperations>> = std::sync::RwLock::new(None);
+static WIDGET_EVENTS: std::sync::RwLock<Option<rekenshi_plugin_sdk::operations::Provider>> =
+    std::sync::RwLock::new(None);
+static WIDGET_SERIAL: AtomicU64 = AtomicU64::new(1);
+pub(super) fn publish_policy(host: rekenshi_plugin_api::HostV1) -> Result<(), Error> {
+    *OPERATIONS.write().map_err(|_| "UI operation lock")? = Some(AdapterOperations::publish(
+        host,
+        "Fingerprint-gated MyGUI SkinItem and EditText colour setters; copied colours only; tracked widget destruction precedes native teardown; UI thread",
+        &[
+            (adapters::UI_COLOUR, "rekenshi.mygui-colour@1", 16),
+            (adapters::UI_SKIN, "rekenshi.finite-f32x4-le@1", 16),
+        ],
+    )?);
+    *POLICY.write().map_err(|_| "UI policy lock")? =
+        rekenshi_plugin_sdk::policies::PolicyProvider::optional(
+            host,
+            rekenshi_plugin_sdk::policies::UI,
+            "Host-fingerprinted MyGUI widget skin initialization/shutdown, SkinItem creation/colour and EditText colour/destruction; UI-thread live borrow tracking; no universal UI-ready claim",
+        )?;
+    *WIDGET_EVENTS.write().map_err(|_| "widget events lock")? = Some(rekenshi_plugin_sdk::operations::Operations::from_host(host)?.publish(
+        rekenshi_plugin_sdk::operations::Contract::new(adapters::UI_WIDGET,"rekenshi.widget-occurrence-le@1",
+        "Deferred copied observation, drained on serialized plugin lane; IDs grant no native access",
+        "Fingerprint-gated MyGUI initialize, createSkin and shutdown hooks; kind u32 then opaque u64 ID; bounded copied skin name metadata",12)?.events())?);
+    Ok(())
+}
+pub(super) fn revoke_policy() -> Result<(), Error> {
+    let mut events = WIDGET_EVENTS.write().map_err(|_| "widget events lock")?;
+    if let Some(provider) = events.as_mut() {
+        provider.revoke()?;
+    }
+    *events = None;
+    if let Some(mut operations) = OPERATIONS.write().map_err(|_| "UI operation lock")?.take() {
+        operations.revoke()?;
+    }
+    if let Some(mut policy) = POLICY.write().map_err(|_| "UI policy lock")?.take() {
+        policy.revoke()?;
+    }
+    Ok(())
+}
+fn public_colour(colour: Colour, text: bool) -> Colour {
+    let input = rekenshi_plugin_sdk::policies::encode([colour.0, colour.1, colour.2, colour.3]);
+    let values = input
+        .ok()
+        .and_then(|input| {
+            OPERATIONS.read().ok()?.as_ref()?.transform(
+                adapters::UI_COLOUR,
+                if text { b"text" } else { b"panel" },
+                &input,
+            )
+        })
+        .and_then(|b| rekenshi_plugin_sdk::policies::decode(&b).ok())
+        .filter(|v| v.iter().all(|c| (0. ..=1.).contains(c)));
+    values.map_or(colour, |c| Colour(c[0], c[1], c[2], c[3]))
+}
+fn config() -> u64 {
+    if let Some(values) = POLICY
+        .read()
+        .ok()
+        .and_then(|p| p.as_ref().map(|p| p.values([0., 0.6, 0., 0.])))
+    {
+        configure(values[0] == 1., values[1] as f64);
+    }
+    CONFIG.load(Ordering::Acquire)
+}
 #[derive(Default)]
 struct Tracks {
     epoch: u64,
-    applied: u64,
+    applied: (u64, u64),
     panels: BTreeMap<usize, Panel>,
     texts: BTreeMap<usize, Colour>,
+    widgets: BTreeMap<usize, u64>,
+}
+fn widget_event(widget: usize, kind: u32, name: &[u8]) {
+    let id = tracked(|tracks| {
+        if kind == 3 {
+            tracks.widgets.remove(&widget)
+        } else {
+            Some(
+                *tracks
+                    .widgets
+                    .entry(widget)
+                    .or_insert_with(|| WIDGET_SERIAL.fetch_add(1, Ordering::Relaxed)),
+            )
+        }
+    });
+    if let Some(id) = id {
+        let payload = [kind.to_le_bytes().as_slice(), id.to_le_bytes().as_slice()].concat();
+        if let Ok(provider) = WIDGET_EVENTS.read() {
+            if let Some(provider) = provider.as_ref() {
+                let _ = provider.dispatch_bounded(&name[..name.len().min(512)], &payload, 12);
+            }
+        }
+    }
 }
 #[derive(Clone, Copy)]
 struct Panel {
@@ -221,7 +311,25 @@ unsafe extern "C" fn initialize_hook(
             let Some(name) = (h.host.text)((h.skin_name)(skin)) else {
                 return false;
             };
-            let surface = palette::is_surface(&name);
+            let defaults = [
+                f32::from(palette::is_surface(&name)),
+                palette::minimum_brightness(&name),
+                0.,
+                0.,
+            ];
+            let values = rekenshi_plugin_sdk::policies::encode(defaults)
+                .ok()
+                .and_then(|input| {
+                    OPERATIONS.read().ok()?.as_ref()?.transform(
+                        adapters::UI_SKIN,
+                        name.as_bytes(),
+                        &input,
+                    )
+                })
+                .and_then(|bytes| rekenshi_plugin_sdk::policies::decode(&bytes).ok())
+                .filter(|values| matches!(values[0], 0. | 1.) && (0. ..=1.).contains(&values[1]))
+                .unwrap_or(defaults);
+            let surface = values[0] == 1.;
             if surface {
                 tracked(|t| {
                     t.panels.insert(
@@ -229,7 +337,7 @@ unsafe extern "C" fn initialize_hook(
                         Panel {
                             original: Colour(1., 1., 1., 1.),
                             skin: 0,
-                            minimum_brightness: palette::minimum_brightness(&name),
+                            minimum_brightness: values[1],
                         },
                     );
                 });
@@ -242,10 +350,11 @@ unsafe extern "C" fn initialize_hook(
     let result = with_surface(widget as usize, surface, || unsafe {
         h.initialize.call(widget, skin, template)
     });
+    widget_event(widget as usize, 1, &[]);
     if surface {
         let _ = std::panic::catch_unwind(|| {
             if let Some(original) = tracked(|t| t.panels.get(&(widget as usize)).copied()) {
-                let (enabled, brightness) = configuration(CONFIG.load(Ordering::Acquire));
+                let (enabled, brightness) = configuration(config());
                 if original.skin != 0 {
                     let output = if enabled {
                         palette::surface(
@@ -257,6 +366,8 @@ unsafe extern "C" fn initialize_hook(
                     };
                     // SAFETY: MyGUI supplied this live SkinItem base pointer
                     // during creation. Direct colour updates leave child tints intact.
+                    let output = public_colour(output, false);
+                    // SAFETY: Tracked live skin; setter copies the stack colour synchronously.
                     unsafe { h.skin_colour.call(original.skin as *mut c_void, &output) };
                 }
             }
@@ -278,9 +389,16 @@ unsafe extern "C" fn create_skin_hook(skin: *mut c_void, resource: *mut c_void) 
     });
     // SAFETY: MyGUI's native initializer supplies this live base and ResourceSkin.
     unsafe { h.create_skin.call(skin, resource) };
+    let (widget, _) = SURFACE.with(Cell::get);
+    if widget != 0 {
+        // SAFETY: Native initializer supplies a live ResourceSkin for this call.
+        let name = unsafe { (h.host.text)((h.skin_name)(resource)) }.unwrap_or_default();
+        widget_event(widget, 2, name.as_bytes());
+    }
 }
 unsafe extern "C" fn shutdown_hook(widget: *mut c_void) {
     let Some(h) = HOOKS.get() else { return };
+    widget_event(widget as usize, 3, &[]);
     let _ = std::panic::catch_unwind(|| {
         tracked(|t| {
             t.panels.remove(&(widget as usize));
@@ -331,7 +449,7 @@ unsafe extern "C" fn skin_colour_hook(skin: *mut c_void, input: *const Colour) {
     }
     // SAFETY: Native SkinItem supplies a valid colour reference and this pointer.
     let original = unsafe { *input };
-    let (enabled, brightness) = configuration(CONFIG.load(Ordering::Acquire));
+    let (enabled, brightness) = configuration(config());
     let output = std::panic::catch_unwind(|| {
         let (widget, surface) = SURFACE.with(Cell::get);
         let mut minimum_brightness = 0.;
@@ -353,6 +471,8 @@ unsafe extern "C" fn skin_colour_hook(skin: *mut c_void, input: *const Colour) {
     })
     .unwrap_or(original);
     // SAFETY: This only colours this SkinItem's subskins, not its child widgets.
+    let output = public_colour(output, false);
+    // SAFETY: Native setter receives the original live skin and a readable copied colour.
     unsafe { h.skin_colour.call(skin, &output) };
 }
 unsafe extern "C" fn text_hook(text: *mut c_void, input: *const Colour) {
@@ -366,7 +486,7 @@ unsafe extern "C" fn text_hook(text: *mut c_void, input: *const Colour) {
         tracked(|t| {
             t.texts.insert(text as usize, original);
         });
-        if configuration(CONFIG.load(Ordering::Acquire)).0 {
+        if configuration(config()).0 {
             palette::text(original)
         } else {
             original
@@ -375,6 +495,8 @@ unsafe extern "C" fn text_hook(text: *mut c_void, input: *const Colour) {
     .unwrap_or(original);
     // SAFETY: Final EditText colour path covers manual text and native skin states;
     // shadow colour/alpha, captions, font metrics and cursor behavior are untouched.
+    let output = public_colour(output, true);
+    // SAFETY: Native setter receives the original live text object and copied colour.
     unsafe { h.text.call(text, &output) };
 }
 /// Apply pending settings to tracked widgets on MyGUI's thread.
@@ -384,12 +506,17 @@ unsafe extern "C" fn text_hook(text: *mut c_void, input: *const Colour) {
 /// or on a thread with no tracked widgets during quiescent shutdown.
 pub unsafe fn frame() {
     let Some(h) = HOOKS.get() else { return };
-    let config = CONFIG.load(Ordering::Acquire);
+    let config = config();
+    let revision = OPERATIONS
+        .read()
+        .ok()
+        .and_then(|o| o.as_ref().map(|o| o.revision(adapters::UI_COLOUR)))
+        .unwrap_or(0);
     let changes = tracked(|t| {
-        if t.applied == config {
+        if t.applied == (config, revision) {
             return None;
         }
-        t.applied = config;
+        t.applied = (config, revision);
         Some((
             t.panels.iter().map(|(&p, &c)| (p, c)).collect::<Vec<_>>(),
             t.texts.iter().map(|(&p, &c)| (p, c)).collect::<Vec<_>>(),
@@ -409,22 +536,31 @@ pub unsafe fn frame() {
                 // its skin children (portraits/status controls can have own tints).
                 h.skin_colour.call(
                     panel.skin as *mut c_void,
-                    &if enabled {
-                        palette::surface(panel.original, brightness.max(panel.minimum_brightness))
-                    } else {
-                        panel.original
-                    },
+                    &public_colour(
+                        if enabled {
+                            palette::surface(
+                                panel.original,
+                                brightness.max(panel.minimum_brightness),
+                            )
+                        } else {
+                            panel.original
+                        },
+                        false,
+                    ),
                 );
             }
         }
         for (p, original) in texts {
             h.text.call(
                 p as *mut c_void,
-                &if enabled {
-                    palette::text(original)
-                } else {
-                    original
-                },
+                &public_colour(
+                    if enabled {
+                        palette::text(original)
+                    } else {
+                        original
+                    },
+                    true,
+                ),
             );
         }
     }

@@ -1,81 +1,177 @@
 //! Graphics backend plugin and owned interface for effect plugins.
 #![forbid(unsafe_code)]
 use crate::native;
-use rekenshi_plugin_api::{HostV1, OK};
-use rekenshi_plugin_runtime::{Context, Plugin, Settings};
-use std::path::Path;
-#[derive(Debug)]
-pub struct GraphicsBackend;
+use rekenshi_plugin_api::OK;
+use rekenshi_plugin_runtime::{Context, Control, Plugin, Setting, Settings, Value};
+use rekenshi_plugin_sdk::operations::{Operations, Registration, SHADER_SOURCE, shader_metadata};
+#[derive(Debug, Default)]
+pub struct GraphicsBackend {
+    source: Option<Registration>,
+    identity: Option<Registration>,
+    draw: Option<Registration>,
+    parameters: std::sync::Arc<std::sync::RwLock<[f32; 4]>>,
+}
+const SETTINGS: &[Setting] = &[
+    Setting {
+        key: "graphics.ssao",
+        label: "Ambient occlusion (experimental)",
+        description: "Contact shading in ambient light before fog and UI. Applies immediately. Off by default pending in-game validation.",
+        default: Value::Toggle(false),
+        control: Control::Toggle,
+    },
+    Setting {
+        key: "graphics.ssao_strength",
+        label: "AO strength",
+        description: "Amount of contact shading. Zero preserves original lighting.",
+        default: Value::Number(0.6),
+        control: Control::Number {
+            min: 0.,
+            max: 2.,
+            step: 0.1,
+        },
+    },
+    Setting {
+        key: "graphics.ssao_radius",
+        label: "AO radius (metres)",
+        description: "Neighbourhood size for contact shading. Large radii can produce halos.",
+        default: Value::Number(1.5),
+        control: Control::Number {
+            min: 0.1,
+            max: 5.,
+            step: 0.1,
+        },
+    },
+    Setting {
+        key: "graphics.ssao_debug",
+        label: "AO debug view",
+        description: "0: normal scene, 1: occlusion, 2: depth (0–100m), 3: world normals. Requires AO enabled; fog still follows.",
+        default: Value::Number(0.),
+        control: Control::Number {
+            min: 0.,
+            max: 3.,
+            step: 1.,
+        },
+    },
+];
 
-/// Owned post-tonemap pass. The backend copies the shader and owns all COM
-/// objects; effect plugins receive no native pointers.
-#[derive(Debug)]
-pub struct PostProcess {
-    owner: u64,
-    handle: Option<u64>,
-}
-impl PostProcess {
-    pub fn new(
-        context: &Context,
-        shader: &[u8],
-        priority: i32,
-        parameters: [f32; 16],
-    ) -> Result<Self, rekenshi_plugin_runtime::Error> {
-        Ok(Self {
-            owner: context.host.native().plugin_token,
-            handle: Some(native::register_owned(
-                context.host.native().plugin_token,
-                shader,
-                priority,
-                parameters,
-            )?),
-        })
-    }
-    pub fn update(&mut self, parameters: [f32; 16]) -> Result<(), rekenshi_plugin_runtime::Error> {
-        native::update_effect(
-            self.owner,
-            self.handle.ok_or("effect already removed")?,
-            parameters,
-        )
-        .map_err(rekenshi_plugin_runtime::Error::from)
-    }
-    pub fn remove(&mut self) -> Result<(), rekenshi_plugin_runtime::Error> {
-        if let Some(handle) = self.handle {
-            native::remove_owned(self.owner, handle)?;
-            self.handle = None;
-        }
-        Ok(())
-    }
-}
-impl Drop for PostProcess {
-    fn drop(&mut self) {
-        let _ = self.remove();
-    }
-}
 impl Plugin for GraphicsBackend {
     fn id(&self) -> &'static str {
         "graphics"
     }
     fn title(&self) -> &'static str {
-        "Graphics backend"
+        "Ambient occlusion"
     }
-    fn start(
+    fn settings(&self) -> &'static [Setting] {
+        SETTINGS
+    }
+    fn register(
         &mut self,
         context: &Context,
         _: &Settings,
     ) -> Result<(), rekenshi_plugin_runtime::Error> {
-        native::initialize(context.host.native(), &context.root)
-            .map_err(rekenshi_plugin_runtime::Error::from)
+        let registration = Operations::new(context)?.transform(
+            SHADER_SOURCE,
+            "rekenshi.graphics.ambient-occlusion@1",
+            0,
+            |metadata, source| {
+                Ok(shader_metadata(metadata).and_then(|(entry, profile)| {
+                    crate::ssao::lighting_shader(source, entry, profile)
+                }))
+            },
+        )?;
+        if registration.late() {
+            context.log(
+                "AO source registration missed compilation; restart required for existing shaders",
+            );
+        }
+        self.source = Some(registration);
+        const ID: u64 = 0x72656b656e736169;
+        self.identity = Some(Operations::new(context)?.transform(
+            rekenshi_plugin_sdk::adapters::SHADER_BINDING,
+            "rekenshi.graphics.lighting-identity@1",
+            0,
+            |_, bytes| {
+                let marker = b"REKenshiSsaoConstants\0";
+                if bytes.windows(marker.len()).any(|v| v == marker) {
+                    Ok(Some(
+                        rekenshi_plugin_sdk::render::ShaderBinding {
+                            identity: ID,
+                            slot: 13,
+                            parameters: [0., 1.5, 0.04, 0.],
+                        }
+                        .encode()?,
+                    ))
+                } else {
+                    Ok(None)
+                }
+            },
+        )?);
+        let parameters = std::sync::Arc::clone(&self.parameters);
+        self.draw = Some(Operations::new(context)?.transform(
+            rekenshi_plugin_sdk::adapters::DRAW_PARAMETERS,
+            "rekenshi.graphics.lighting-draw@1",
+            0,
+            move |_, bytes| {
+                let mut binding = rekenshi_plugin_sdk::render::ShaderBinding::decode(bytes)?;
+                if binding.identity != ID {
+                    return Ok(None);
+                }
+                binding.parameters = *parameters.read().map_err(|_| "AO policy lock poisoned")?;
+                Ok(Some(binding.encode()?))
+            },
+        )?);
+        Ok(())
     }
-    fn update(&mut self, _: &Context, _: &Settings) -> Result<(), rekenshi_plugin_runtime::Error> {
+    fn install(
+        &mut self,
+        context: &Context,
+        settings: &Settings,
+    ) -> Result<(), rekenshi_plugin_runtime::Error> {
+        native::initialize(context.host.native(), &context.root)?;
+        self.settings_changed(context, settings)
+    }
+    fn settings_changed(
+        &mut self,
+        _: &Context,
+        settings: &Settings,
+    ) -> Result<(), rekenshi_plugin_runtime::Error> {
+        let enabled = settings.enabled(SETTINGS[0].key);
+        let parameters = [
+            if enabled {
+                settings.number(SETTINGS[1].key) as f32
+            } else {
+                0.
+            },
+            settings.number(SETTINGS[2].key) as f32,
+            0.04, // Four-centimetre bias prevents numerical self-occlusion.
+            if enabled {
+                settings.number(SETTINGS[3].key).round() as f32
+            } else {
+                0.
+            },
+        ];
+        *self
+            .parameters
+            .write()
+            .map_err(|_| "AO policy lock poisoned")? = parameters;
         Ok(())
     }
     fn stop(&mut self) -> Result<(), rekenshi_plugin_runtime::Error> {
-        stop()
+        if let Some(draw) = self.draw.as_mut() {
+            draw.remove()?;
+        }
+        self.draw = None;
+        if let Some(identity) = self.identity.as_mut() {
+            identity.remove()?;
+        }
+        self.identity = None;
+        stop()?;
+        if let Some(source) = self.source.as_mut() {
+            source.remove()?;
+        }
+        self.source = None;
+        Ok(())
     }
-}
-pub fn start_legacy(host: HostV1, root: &Path) -> Result<(), rekenshi_plugin_runtime::Error> {
-    native::initialize(host, root).map_err(rekenshi_plugin_runtime::Error::from)
 }
 pub fn stop() -> Result<(), rekenshi_plugin_runtime::Error> {
     if native::stop() == OK {

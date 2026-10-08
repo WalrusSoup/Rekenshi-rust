@@ -376,6 +376,7 @@ dependencies = [
  "rekenshi-native",
  "rekenshi-plugin-api",
  "rekenshi-plugin-runtime",
+ "rekenshi-plugin-sdk",
 ]
 
 [[package]]
@@ -395,6 +396,7 @@ dependencies = [
  "rekenshi-color-grade",
  "rekenshi-native",
  "rekenshi-plugin-api",
+ "rekenshi-plugin-sdk",
 ]
 
 [[package]]
@@ -413,6 +415,7 @@ dependencies = [
  "rekenshi-native",
  "rekenshi-plugin-api",
  "rekenshi-plugin-runtime",
+ "rekenshi-plugin-sdk",
  "rekenshi-sic",
  "toml",
 ]
@@ -423,7 +426,9 @@ version = "0.1.0"
 dependencies = [
  "detour",
  "rekenshi-native",
+ "rekenshi-plugin-api",
  "rekenshi-plugin-runtime",
+ "rekenshi-plugin-sdk",
  "windows-sys",
 ]
 
@@ -435,6 +440,7 @@ dependencies = [
  "rekenshi-native",
  "rekenshi-plugin-api",
  "rekenshi-plugin-runtime",
+ "rekenshi-plugin-sdk",
 ]
 
 [[package]]
@@ -460,6 +466,7 @@ dependencies = [
  "rekenshi-native",
  "rekenshi-plugin-api",
  "rekenshi-plugin-runtime",
+ "rekenshi-plugin-sdk",
  "windows",
 ]
 
@@ -470,6 +477,7 @@ dependencies = [
  "rekenshi-graphics",
  "rekenshi-native",
  "rekenshi-plugin-api",
+ "rekenshi-plugin-sdk",
 ]
 
 [[package]]
@@ -481,6 +489,7 @@ dependencies = [
  "rekenshi-native",
  "rekenshi-plugin-api",
  "rekenshi-plugin-runtime",
+ "rekenshi-plugin-sdk",
  "sha2",
 ]
 
@@ -512,6 +521,7 @@ version = "0.1.0"
 dependencies = [
  "rekenshi-plugin-api",
  "serde",
+ "sha2",
  "toml",
 ]
 
@@ -544,6 +554,7 @@ dependencies = [
  "rekenshi-native",
  "rekenshi-plugin-api",
  "rekenshi-plugin-runtime",
+ "rekenshi-plugin-sdk",
  "rekenshi-shader-cache",
  "rekenshi-sic",
  "rekenshi-weather",
@@ -561,6 +572,7 @@ dependencies = [
  "rekenshi-native",
  "rekenshi-plugin-api",
  "rekenshi-plugin-runtime",
+ "rekenshi-plugin-sdk",
  "serde",
  "sha2",
  "toml",
@@ -572,6 +584,7 @@ version = "0.1.0"
 dependencies = [
  "rekenshi-native",
  "rekenshi-plugin-api",
+ "rekenshi-plugin-sdk",
  "rekenshi-shader-cache",
 ]
 
@@ -582,6 +595,14 @@ dependencies = [
  "image",
  "serde",
  "zstd",
+]
+
+[[package]]
+name = "rekenshi-source-transform"
+version = "0.1.0"
+dependencies = [
+ "rekenshi-plugin-api",
+ "rekenshi-plugin-sdk",
 ]
 
 [[package]]
@@ -600,6 +621,7 @@ dependencies = [
  "rekenshi-native",
  "rekenshi-plugin-api",
  "rekenshi-plugin-runtime",
+ "rekenshi-plugin-sdk",
 ]
 
 [[package]]

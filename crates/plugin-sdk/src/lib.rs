@@ -22,7 +22,7 @@
 //! struct Observer { frames: Arc<AtomicU64> }
 //! impl Plugin for Observer {
 //!     fn id(&self) -> &'static str { "observer" }
-//!     fn start(&mut self, context: &Context, _: &Settings) -> Result<(), Error> {
+//!     fn install(&mut self, context: &Context, _: &Settings) -> Result<(), Error> {
 //!         let frames = self.frames.clone();
 //!         context.host.hook_ui_frame(move |_| { frames.fetch_add(1, Ordering::Relaxed); })?;
 //!         Ok(())
@@ -30,12 +30,18 @@
 //! }
 //! ```
 //!
-//! Existing plugins migrating from string errors should return [`Error`] from
-//! `start`, `update`, and `stop`. Use [`gameplay::Gameplay`] as its canonical path.
+//! Return [`Error`] from `register`, `install`, `settings_changed`, and `stop`.
+//! Use [`gameplay::Gameplay`] as its canonical path.
 #![deny(missing_docs)]
+pub mod adapters;
+pub mod codecs;
 mod dll;
+pub mod events;
 pub mod gameplay;
 mod graphics;
+pub mod operations;
+pub mod policies;
+pub mod render;
 mod transport;
 mod weather;
 
@@ -82,8 +88,30 @@ macro_rules! export_plugin {
                 // SAFETY: Loader supplies a readable negotiated HostV1 table.
                 unsafe { REKENSHI_PLUGIN.start(host) }
             }
+            /// Commit desired registrations before the host activates native providers.
+            ///
+            /// # Safety
+            /// Host supplies a stable negotiated HostV1 table.
+            // SAFETY: Unique mandatory SDK preparation export; frozen PluginV1 unchanged.
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn rekenshi_plugin_prepare(
+                version: u32,
+                host: *const $crate::_private::abi::HostV1,
+            ) -> i32 {
+                if version != 1 {
+                    return $crate::_private::abi::INCOMPATIBLE;
+                }
+                // SAFETY: Forward the loader's stable host table contract.
+                unsafe { REKENSHI_PLUGIN.prepare(host) }
+            }
             unsafe extern "C" fn stop() -> i32 {
                 REKENSHI_PLUGIN.stop()
+            }
+            /// Deliver copied lifecycle transitions at the verified game dispatch point.
+            // SAFETY: Unique optional scalar-only lifecycle delivery export.
+            #[unsafe(no_mangle)]
+            pub extern "C" fn rekenshi_plugin_dispatch(version: u32) -> i32 {
+                REKENSHI_PLUGIN.dispatch(version)
             }
             /// Negotiate the plugin's declarative settings interface.
             ///

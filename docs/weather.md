@@ -16,8 +16,8 @@ changed. Emission counts are unchanged; no FPS improvement is claimed.
 Optional thin streaks and camera fade live in an independent DLL under
 `samples/rain-refinement`; see [sample setup](../samples/README.md). The sample
 uses the SDK's safe `RainRendering` handle. The host owns the rendering adapter;
-both controls coexist without competing hooks. Rebuild older rain-refinement
-DLLs with this SDK before using them with the shared adapter.
+both controls coexist without competing hooks. The owned style can be registered
+before the provider is available and activates when its rendering adapter is ready.
 
 The SDK exports its three controls in Options: enable, visibility (default 0.25),
 and streak size (default 1.0). Changes apply on the next particle render.
@@ -37,7 +37,9 @@ billboards. It restores defaults even during unwinding. Original particles,
 materials, weather strengths, rain collectors, damage, audio and scripts are
 untouched. Splash, dust, blood, fire and other billboard effects bypass the optional rain style.
 Local-space particles are transformed by their parent node before camera fade.
-There are no persistent native object pointers or per-drop allocations.
+The rain style retains no native object pointers and makes no per-drop allocations.
+Opt-in public particle interceptors receive copied records and incur copying and
+dispatch costs on the rendering lane.
 
 Supported binaries:
 

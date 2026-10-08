@@ -1,5 +1,6 @@
 //! Adapter for the fingerprinted terrain DLL's TIFF reader. Hooking its reader
 //! preserves native coordinate conversion, height scaling and terrain caches.
+use rekenshi_plugin_sdk::adapters::{self, AdapterOperations};
 mod mapped;
 #[cfg(test)]
 mod tests;
@@ -29,15 +30,25 @@ struct Session {
     host: HostV1,
     path: PathBuf,
     heightmap: Arc<mapped::Heightmap>,
+    gigacache: Option<Arc<mapped::Heightmap>>,
     streams: HashMap<usize, Arc<mapped::Heightmap>>,
 }
 static HOOKS: OnceLock<Hooks> = OnceLock::new();
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+// Serialize lifecycle/configuration without holding SESSION during the eager copy.
+static CONFIGURATION: Mutex<()> = Mutex::new(());
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static OPERATIONS: std::sync::RwLock<Option<AdapterOperations>> = std::sync::RwLock::new(None);
 static READS: AtomicU64 = AtomicU64::new(0);
+static POLICY: std::sync::RwLock<Option<rekenshi_plugin_sdk::policies::PolicyProvider>> =
+    std::sync::RwLock::new(None);
+static MODE: AtomicU64 = AtomicU64::new(0);
 
-pub(super) fn start(host: HostV1, game: &Path) -> Result<(), String> {
+fn start_bindings(host: HostV1, game: &Path) -> Result<(), String> {
+    let _configuration = CONFIGURATION
+        .lock()
+        .map_err(|_| "heightmap configuration poisoned")?;
     let mut session = SESSION.lock().map_err(|_| "heightmap lock poisoned")?;
     let path = game
         .join("data/newland/land/fullmap.tif")
@@ -101,6 +112,7 @@ pub(super) fn start(host: HostV1, game: &Path) -> Result<(), String> {
         host,
         path,
         heightmap,
+        gigacache: None,
         streams: HashMap::new(),
     });
     let mut tx = Transaction::new();
@@ -113,12 +125,67 @@ pub(super) fn start(host: HostV1, game: &Path) -> Result<(), String> {
     ACTIVE.store(true, Ordering::Release);
     Ok(())
 }
-pub(super) fn set_enabled(value: bool) {
-    ENABLED.store(value, Ordering::Release);
+pub(super) fn start(host: HostV1, game: &Path) -> Result<(), String> {
+    start_bindings(host, game)?;
+    *OPERATIONS.write().map_err(|_| "operation registry lock")? = Some(AdapterOperations::publish(host, "Existing adapter fingerprint and native signatures validated before hook enable; see implementation inventory and adapter source for evidence limits", &[(adapters::HEIGHTMAP_READ,"rekenshi.u16-height-row-le@1",16777216),(adapters::HEIGHTMAP_LOAD,"rekenshi.utf8-path@1",32768)]).map_err(|e| e.to_string())?);
+    *POLICY.write().map_err(|_| "heightmap policy lock")? = rekenshi_plugin_sdk::policies::PolicyProvider::optional(host, rekenshi_plugin_sdk::policies::HEIGHTMAP,
+        "Plugin_Terrain_x64 SHA256 53AFD1E4FAF35020556D33F57007D51C2A9D2330B630E39A67161EE850B7A239; TIFF open/close/pixel/rectangle; Arc-owned maps survive readers; not world-loaded evidence").map_err(|e| e.to_string())?;
+    Ok(())
+}
+pub(super) fn configure(mapped: bool, eager: bool) -> Result<(), String> {
+    let _configuration = CONFIGURATION
+        .lock()
+        .map_err(|_| "heightmap configuration poisoned")?;
+    let source = {
+        let guard = SESSION.lock().map_err(|_| "heightmap lock poisoned")?;
+        let session = guard.as_ref().ok_or("heightmap session unavailable")?;
+        (eager && session.gigacache.is_none()).then(|| Arc::clone(&session.heightmap))
+    };
+    // Native reads continue using the previous mode while the copy is prepared.
+    // On allocation/validation failure both the previous source and toggle survive.
+    let prepared = source
+        .map(|map| map.eager_copy().map(Arc::new))
+        .transpose()?;
+    let retired = {
+        let mut guard = SESSION.lock().map_err(|_| "heightmap lock poisoned")?;
+        let session = guard.as_mut().ok_or("heightmap session unavailable")?;
+        if let Some(prepared) = prepared {
+            session.host.write_log(&format!(
+                "Gigacache ready: {} bytes eagerly copied; OS paging remains possible",
+                prepared.eager_bytes()
+            ));
+            session.gigacache = Some(prepared);
+        }
+        let retired = if eager {
+            None
+        } else {
+            session.gigacache.take()
+        };
+        ENABLED.store(mapped || eager, Ordering::Release);
+        MODE.store(mapped as u64 | ((eager as u64) << 1), Ordering::Release);
+        retired
+    };
+    // Existing readers own an Arc; release the large allocation outside SESSION.
+    drop(retired);
+    Ok(())
 }
 pub(super) fn stop() -> Result<(), String> {
+    if let Some(mut operations) = OPERATIONS
+        .write()
+        .map_err(|_| "operation registry lock")?
+        .take()
+    {
+        operations.revoke().map_err(|e| e.to_string())?;
+    }
+    if let Some(mut policy) = POLICY.write().map_err(|_| "heightmap policy lock")?.take() {
+        policy.revoke().map_err(|e| e.to_string())?;
+    }
+    let _configuration = CONFIGURATION
+        .lock()
+        .map_err(|_| "heightmap configuration poisoned")?;
     ACTIVE.store(false, Ordering::Release);
     ENABLED.store(false, Ordering::Release);
+    MODE.store(0, Ordering::Release);
     if let Some(hooks) = HOOKS.get() {
         let mut tx = Transaction::new();
         tx.disable(&hooks.rectangle);
@@ -147,7 +214,24 @@ extern "C" fn open_hook(path: *const c_char, mode: i32) -> *mut c_void {
     let Some(hooks) = HOOKS.get() else {
         return std::ptr::null_mut();
     };
-    // SAFETY: Native caller supplies its original filename and open mode.
+    let selected = if !path.is_null() && ACTIVE.load(Ordering::Acquire) {
+        // SAFETY: Native open supplies a terminated filename valid through this call.
+        let input = unsafe { CStr::from_ptr(path) }.to_bytes();
+        OPERATIONS
+            .read()
+            .ok()
+            .and_then(|operations| {
+                operations.as_ref().and_then(|operations| {
+                    operations.transform(adapters::HEIGHTMAP_LOAD, &mode.to_le_bytes(), input)
+                })
+            })
+            .filter(|bytes| !bytes.is_empty() && std::str::from_utf8(bytes).is_ok())
+            .and_then(|bytes| std::ffi::CString::new(bytes).ok())
+    } else {
+        None
+    };
+    let path = selected.as_ref().map_or(path, |selected| selected.as_ptr());
+    // SAFETY: Original or owned replacement filename and open mode remain live.
     let stream = unsafe { hooks.open.call(path, mode) };
     let _ = std::panic::catch_unwind(|| {
         if stream.is_null() || path.is_null() || mode != 1 || !ACTIVE.load(Ordering::Acquire) {
@@ -207,16 +291,37 @@ extern "C" fn close_hook(stream: *mut c_void) {
     unsafe { hooks.close.call(stream) };
 }
 fn heightmap(stream: *mut c_void) -> Option<Arc<mapped::Heightmap>> {
+    let desired = POLICY
+        .read()
+        .ok()
+        .and_then(|p| p.as_ref().map(|p| p.values([0.; 4])));
+    if let Some(policy) = desired {
+        let mapped = policy[0] == 1.;
+        let eager = policy[1] == 1.;
+        let mode = mapped as u64 | ((eager as u64) << 1);
+        if MODE.load(Ordering::Acquire) != mode && configure(mapped, eager).is_err() {
+            return None;
+        }
+    }
     if !ACTIVE.load(Ordering::Acquire) || !ENABLED.load(Ordering::Acquire) {
         return None;
     }
-    SESSION
-        .lock()
+    let guard = SESSION.lock().ok()?;
+    let session = guard.as_ref()?;
+    let mapped = session.streams.get(&(stream as usize))?;
+    Some(Arc::clone(session.gigacache.as_ref().unwrap_or(mapped)))
+}
+fn transformed_row(x: i32, y: i32, width: i32, bytes: &[u8]) -> Option<Vec<u8>> {
+    let metadata: Vec<_> = [x, y, width, 1]
+        .into_iter()
+        .flat_map(i32::to_le_bytes)
+        .collect();
+    OPERATIONS
+        .read()
         .ok()?
         .as_ref()?
-        .streams
-        .get(&(stream as usize))
-        .cloned()
+        .transform(adapters::HEIGHTMAP_READ, &metadata, bytes)
+        .filter(|b| b.len() == bytes.len())
 }
 extern "C" fn pixel_hook(stream: *mut c_void, x: i32, y: i32, out: *mut c_void) -> usize {
     let result = std::panic::catch_unwind(|| {
@@ -227,7 +332,15 @@ extern "C" fn pixel_hook(stream: *mut c_void, x: i32, y: i32, out: *mut c_void) 
         }
         // SAFETY: Native 16-bit grayscale read contract supplies two writable
         // output bytes. Mapped source is read-only and lives through this Arc.
-        unsafe { std::ptr::copy_nonoverlapping(row.as_ptr(), out.cast(), 2) };
+        let transformed = transformed_row(x, y, 1, row);
+        // SAFETY: Native caller supplies two writable bytes; source lives through the copy.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                transformed.as_deref().unwrap_or(row).as_ptr(),
+                out.cast(),
+                2,
+            )
+        };
         READS.fetch_add(1, Ordering::Relaxed);
         Some(1)
     })
@@ -237,9 +350,19 @@ extern "C" fn pixel_hook(stream: *mut c_void, x: i32, y: i32, out: *mut c_void) 
         return result;
     }
     // SAFETY: Forward original read arguments through retained native trampoline.
-    HOOKS
+    let result = HOOKS
         .get()
-        .map_or(0, |h| unsafe { h.pixel.call(stream, x, y, out) })
+        .map_or(0, |h| unsafe { h.pixel.call(stream, x, y, out) });
+    if result == 1 && !out.is_null() {
+        // SAFETY: Successful native pixel read initialized the caller's two bytes.
+        unsafe {
+            if let Some(bytes) = transformed_row(x, y, 1, std::slice::from_raw_parts(out.cast(), 2))
+            {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast(), 2);
+            }
+        }
+    }
+    result
 }
 extern "C" fn rectangle_hook(
     stream: *mut c_void,
@@ -268,12 +391,13 @@ extern "C" fn rectangle_hook(
         map.row(x, y, w)?;
         for row in 0..h {
             let source = map.row(x, y + row, w)?;
+            let transformed = transformed_row(x as i32, (y + row) as i32, width, source);
             // SAFETY: Native rectangle contract supplies w*h*2 writable bytes.
             // Prevalidated rectangle is wholly inside the immutable map. Edge
             // requests take the original clipping path, including its return count.
             unsafe {
                 std::ptr::copy_nonoverlapping(
-                    source.as_ptr(),
+                    transformed.as_deref().unwrap_or(source).as_ptr(),
                     out.cast::<u8>().add(row * w * 2),
                     w * 2,
                 )
@@ -288,7 +412,26 @@ extern "C" fn rectangle_hook(
         return result;
     }
     // SAFETY: Preserve original clipping/output behavior for all bypassed reads.
-    HOOKS.get().map_or(0, |h| unsafe {
+    let result = HOOKS.get().map_or(0, |h| unsafe {
         h.rectangle.call(stream, x, y, width, height, out)
-    })
+    });
+    if width > 0 && height > 0 && !out.is_null() {
+        let count = (width as usize).checked_mul(height as usize);
+        if count == Some(result) && result <= 32 * 1024 * 1024 {
+            for row in 0..height {
+                let Some(row_y) = y.checked_add(row) else {
+                    break;
+                };
+                // SAFETY: Full successful native rectangle initialized width*height u16 pixels.
+                unsafe {
+                    let pointer = out.cast::<u8>().add(row as usize * width as usize * 2);
+                    let bytes = std::slice::from_raw_parts(pointer, width as usize * 2);
+                    if let Some(transformed) = transformed_row(x, row_y, width, bytes) {
+                        std::ptr::copy_nonoverlapping(transformed.as_ptr(), pointer, bytes.len());
+                    }
+                }
+            }
+        }
+    }
+    result
 }

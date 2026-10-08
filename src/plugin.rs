@@ -77,6 +77,22 @@ pub(crate) fn start() -> Result<(), String> {
         }
     };
     crate::gameplay::prepare();
+    if let Err(error) = crate::internal_plugins::prepare() {
+        logging::write(&format!("internal plugin preparation failed: {error}"));
+    }
+    crate::extensions::prepare();
+    struct Prepared {
+        installed: bool,
+    }
+    impl Drop for Prepared {
+        fn drop(&mut self) {
+            if !self.installed {
+                crate::extensions::stop();
+                let _ = crate::internal_plugins::stop();
+            }
+        }
+    }
+    let mut prepared = Prepared { installed: false };
     let mut transaction = Transaction::new();
     transaction.enable(hook);
     if let Some(ui_hook) = ui_hook {
@@ -122,6 +138,7 @@ pub(crate) fn start() -> Result<(), String> {
         logging::write(&format!("internal plugins unavailable: {error}"));
     }
     crate::extensions::start();
+    prepared.installed = true;
     Ok(())
 }
 
@@ -132,6 +149,7 @@ pub(crate) fn stop() -> Result<(), String> {
     crate::callbacks::ready(false, false);
     crate::extensions::stop();
     crate::internal_plugins::stop()?;
+    crate::ui::menu::stop_overlay();
     if let Some(state) = HOOK.get() {
         let mut transaction = Transaction::new();
         transaction.disable(&state.detour);

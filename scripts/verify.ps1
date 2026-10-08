@@ -45,6 +45,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Native whole-game dark UI colour/lifetime tests failed.' }
         python (Join-Path $PSScriptRoot 'test-sdk.py') $KenshiDir
         if ($LASTEXITCODE -ne 0) { throw 'Independent Rust SDK plugin integration failed.' }
+        python (Join-Path $PSScriptRoot 'test-platform.py') $KenshiDir
+        if ($LASTEXITCODE -ne 0) { throw 'Independent public compiler interception failed.' }
         python (Join-Path $PSScriptRoot 'test-gameplay.py') $KenshiDir
         if ($LASTEXITCODE -ne 0) { throw 'Independent gameplay SDK integration failed.' }
         python (Join-Path $PSScriptRoot 'test-weather.py') $KenshiDir
@@ -58,6 +60,8 @@ try {
             $env:REKENSHI_TEST_GAME = $KenshiDir
             cargo test -p rekenshi-rust --lib --locked managed_callbacks_forward_native_ogre_and_mygui_and_stop_cleanly -- --ignored
             if ($LASTEXITCODE -ne 0) { throw 'Managed Ogre/MyGUI callback integration test failed.' }
+            cargo test -p rekenshi-graphics --test public_gpu --locked -- --ignored
+            if ($LASTEXITCODE -ne 0) { throw 'Independent native shader-binding/effect GPU parity failed.' }
             cargo test -p rekenshi-graphics -p rekenshi-heightmap-cache --lib --locked -- --ignored
             if ($LASTEXITCODE -ne 0) { throw 'GPU output/state or native heightmap differential test failed.' }
         } finally { $env:REKENSHI_TEST_GAME = $oldTestGame }

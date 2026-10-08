@@ -2,6 +2,7 @@
 use crate::ogre;
 use detour::{RawDetour, Threads, Transaction};
 use rekenshi_plugin_api::HostV1;
+use rekenshi_plugin_sdk::adapters::{self, AdapterOperations};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
     collections::VecDeque,
@@ -50,9 +51,19 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     entries: VecDeque::new(),
 });
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static OPERATIONS: std::sync::RwLock<Option<AdapterOperations>> = std::sync::RwLock::new(None);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static HITS: AtomicU64 = AtomicU64::new(0);
 const CAPACITY: usize = 128;
+static POLICY: std::sync::RwLock<Option<rekenshi_plugin_sdk::policies::PolicyProvider>> =
+    std::sync::RwLock::new(None);
+fn enabled() -> bool {
+    POLICY
+        .read()
+        .ok()
+        .and_then(|p| p.as_ref().map(|p| p.values([0.; 4])[0] == 1.))
+        .unwrap_or_else(|| ENABLED.load(Ordering::Acquire))
+}
 pub fn hits() -> u64 {
     HITS.load(Ordering::Relaxed)
 }
@@ -89,6 +100,9 @@ pub(super) fn start(host: HostV1, game: &Path) -> Result<(), String> {
     // SAFETY: Outside DllMain; suspend other threads during instruction patching.
     unsafe { tx.commit(Threads::All) }.map_err(|e| e.to_string())?;
     ACTIVE.store(true, Ordering::Release);
+    *OPERATIONS.write().map_err(|_| "operation registry lock")? = Some(AdapterOperations::publish(host, "Existing adapter fingerprint and native signatures validated before hook enable; see implementation inventory and adapter source for evidence limits", &[(adapters::COLLIDER_LOAD,"rekenshi.collider-request-f32x4@1",16)]).map_err(|e| e.to_string())?);
+    *POLICY.write().map_err(|_| "collider policy lock")? = rekenshi_plugin_sdk::policies::PolicyProvider::optional(host, rekenshi_plugin_sdk::policies::COLLIDER,
+        "Kenshi 1.0.68 executable hash-gated by game_module; load 7e53f0 clone 20b860 release 1d99f0; independent NXU clones; SDK pre-destruction remains unverified").map_err(|e| e.to_string())?;
     host.write_log("collider-cache: native load/clone/release verified; 128 independent templates");
     Ok(())
 }
@@ -102,6 +116,16 @@ pub(super) fn set_enabled(enabled: bool) {
     }
 }
 pub(super) fn stop() -> Result<(), String> {
+    if let Some(mut operations) = OPERATIONS
+        .write()
+        .map_err(|_| "operation registry lock")?
+        .take()
+    {
+        operations.revoke().map_err(|e| e.to_string())?;
+    }
+    if let Some(mut policy) = POLICY.write().map_err(|_| "collider policy lock")?.take() {
+        policy.revoke().map_err(|e| e.to_string())?;
+    }
     ACTIVE.store(false, Ordering::Release);
     set_enabled(false);
     if let Some(state) = STATE.get() {
@@ -119,8 +143,43 @@ unsafe extern "C-unwind" fn load(name: *const c_void, kind: i32) -> usize {
     // SAFETY: Native loader's live std::string and identical retained trampoline.
     unsafe {
         let original: Load = std::mem::transmute(state.hook.trampoline());
-        if !ACTIVE.load(Ordering::Acquire) || !ENABLED.load(Ordering::Acquire) {
+        let mut cache_enabled = enabled();
+        let mut scale = [1.; 3];
+        if let Some(filename) = ogre::string(name) {
+            let metadata = [kind.to_le_bytes().as_slice(), &filename].concat();
+            if let Some(values) = OPERATIONS
+                .read()
+                .ok()
+                .and_then(|o| {
+                    o.as_ref().and_then(|o| {
+                        o.transform(
+                            adapters::COLLIDER_LOAD,
+                            &metadata,
+                            &rekenshi_plugin_sdk::policies::encode([
+                                cache_enabled as u8 as f32,
+                                1.,
+                                1.,
+                                1.,
+                            ])
+                            .ok()?,
+                        )
+                    })
+                })
+                .and_then(|b| rekenshi_plugin_sdk::policies::decode(&b).ok())
+                .filter(|v| v[1..].iter().all(|s| (0.001..=1000.).contains(s)))
+            {
+                cache_enabled = values[0] == 1.;
+                scale.copy_from_slice(&values[1..]);
+            }
+        }
+        if !ACTIVE.load(Ordering::Acquire) {
             return original(name, kind);
+        }
+        if !cache_enabled {
+            if let Ok(mut cache) = CACHE.lock() {
+                cache.entries.clear();
+                cache.sdk = 0;
+            }
         }
         let sdk = (state.sdk)();
         let Some(bytes) = ogre::string(name).filter(|name| eligible(name, kind, sdk)) else {
@@ -134,7 +193,7 @@ unsafe extern "C-unwind" fn load(name: *const c_void, kind: i32) -> usize {
                 cache.entries.clear();
                 cache.sdk = sdk;
             }
-            if ENABLED.load(Ordering::Acquire) {
+            if cache_enabled {
                 if let Some(index) = cache
                     .entries
                     .iter()
@@ -144,7 +203,7 @@ unsafe extern "C-unwind" fn load(name: *const c_void, kind: i32) -> usize {
                         .entries
                         .remove(index)
                         .expect("position is within locked cache");
-                    let copy = (state.clone)(entry.template.pointer, id.as_ptr(), &[1.; 3], sdk);
+                    let copy = (state.clone)(entry.template.pointer, id.as_ptr(), &scale, sdk);
                     cache.entries.push_back(entry);
                     if copy != 0 {
                         HITS.fetch_add(1, Ordering::Relaxed);
@@ -166,7 +225,7 @@ unsafe extern "C-unwind" fn load(name: *const c_void, kind: i32) -> usize {
         };
         if let Ok(mut cache) = CACHE.lock() {
             if ACTIVE.load(Ordering::Acquire)
-                && ENABLED.load(Ordering::Acquire)
+                && cache_enabled
                 && cache.sdk == sdk
                 && !cache
                     .entries
@@ -189,6 +248,12 @@ unsafe extern "C-unwind" fn load(name: *const c_void, kind: i32) -> usize {
                         },
                     });
                 }
+            }
+        }
+        if scale != [1.; 3] {
+            let scaled = (state.clone)(loaded, id.as_ptr(), &scale, sdk);
+            if scaled != 0 {
+                return scaled;
             }
         }
         std::mem::forget(loaded_owner);

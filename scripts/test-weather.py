@@ -15,7 +15,7 @@ spec = spec_from_file_location('native_test', ROOT / 'scripts/test-performance.p
 native = module_from_spec(spec); spec.loader.exec_module(native)
 String, function = native.String, native.function
 
-def child(folder, game, with_sample):
+def child(folder, game, with_sample, public=False):
     import os
     os.chdir(folder); search = os.add_dll_directory(str(game))
     ogre = C.WinDLL(str(folder / 'OgreMain_x64.dll'))
@@ -117,6 +117,15 @@ def child(folder, game, with_sample):
         assert C.c_float.from_buffer(draw_set,0x1d0).value == 1
         assert C.c_float.from_buffer(draw_set,0x1d4).value == 10
         return captured.pop()
+    if public:
+        setting('weather.tone_down',False)
+        assert host.rekenshi_plugins_loaded()==1,log
+        result,width,height=submit()
+        assert abs(struct.unpack_from('<f',result,0x40)[0]-0.123)<1e-6
+        assert (width,height)==(1,10)
+        host.dllStopPlugin(); assert submit()==(original,1,10)
+        print('PASS: independent copied particle interceptor, native source/dimension restoration and owner shutdown')
+        return
     if with_sample:
         setting('weather.tone_down', False)
     else:
@@ -201,7 +210,7 @@ def child(folder, game, with_sample):
 
 if __name__ == '__main__':
     if sys.argv[1] == '--child':
-        child(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4]=='sample')
+        child(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4]=='sample',sys.argv[4]=='public')
     else:
         game = pathlib.Path(sys.argv[1])
         folder = ROOT/'target/weather-tests'/uuid.uuid4().hex
@@ -217,3 +226,9 @@ if __name__ == '__main__':
         shutil.copy2(ROOT/'target/release/rekenshi_rain_refinement.dll',root/'plugins/rekenshi_rain_refinement.dll')
         (root/'plugins.toml').write_text('schema_version=1\ndiscover=true\nplugins=[]\n')
         subprocess.run([sys.executable,__file__,'--child',str(folder),str(game),'sample'],check=True)
+
+        shutil.copy2(ROOT/'target/release/rekenshi_source_transform.dll',root/'plugins/rekenshi_source_transform.dll')
+        settings=root/'settings';settings.mkdir(exist_ok=True)
+        (settings/'source-transform.toml').write_text('schema_version=1\n[settings.values]\n"source_transform.enabled"=true\n"runtime_policy.enabled"=true\n')
+        (root/'plugins.toml').write_text('schema_version=1\ndiscover=false\n[[plugins]]\nfile="rekenshi_source_transform.dll"\nenabled=true\n')
+        subprocess.run([sys.executable,__file__,'--child',str(folder),str(game),'public'],check=True)

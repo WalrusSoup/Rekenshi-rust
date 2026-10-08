@@ -22,6 +22,39 @@ static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 // touches STATE, so a native call that resets the world cannot deadlock this gate.
 static DISPATCH: Mutex<()> = Mutex::new(());
 static RUNNING: AtomicBool = AtomicBool::new(false);
+static EVENTS: std::sync::RwLock<
+    Option<(
+        rekenshi_plugin_sdk::operations::Provider,
+        rekenshi_plugin_sdk::operations::Provider,
+    )>,
+> = std::sync::RwLock::new(None);
+fn roster_event(world: u64, sequence: u64, availability: u32) {
+    if let Ok(events) = EVENTS.read() {
+        if let Some((roster, _)) = events.as_ref() {
+            let payload = [
+                world.to_le_bytes().as_slice(),
+                sequence.to_le_bytes().as_slice(),
+                availability.to_le_bytes().as_slice(),
+            ]
+            .concat();
+            let _ = roster.dispatch_bounded(&[], &payload, payload.len());
+        }
+    }
+}
+fn completed_event(owner: u64, ticket: u64, state: u32, code: i32) {
+    if let Ok(events) = EVENTS.read() {
+        if let Some((_, completed)) = events.as_ref() {
+            let payload = [
+                owner.to_le_bytes().as_slice(),
+                ticket.to_le_bytes().as_slice(),
+                state.to_le_bytes().as_slice(),
+                code.to_le_bytes().as_slice(),
+            ]
+            .concat();
+            let _ = completed.dispatch_bounded(&[], &payload, payload.len());
+        }
+    }
+}
 
 struct Pending {
     token: u64,
@@ -90,7 +123,9 @@ impl State {
         self.squads.clear();
         self.next_id = 1;
         self.sequence += 1;
+        roster_event(self.status.world, self.sequence, availability);
         for pending in self.queue.drain(..) {
+            completed_event(pending.token, pending.ticket, REJECTED, code);
             self.results
                 .insert((pending.token, pending.ticket), rejection(code, message));
         }
@@ -119,8 +154,9 @@ impl State {
             });
         }
         let world = self.status.world;
-        self.rows.clear();
-        for character in characters {
+        let mut changed = self.status.availability != READY || self.rows.len() != characters.len();
+        let count = characters.len();
+        for (index, character) in characters.iter_mut().enumerate() {
             character.row.character = CharacterId {
                 world,
                 id: self.ids[&character.key],
@@ -134,12 +170,21 @@ impl State {
                 .leader_key
                 .and_then(|key| self.ids.get(&key))
                 .map_or(CharacterId::default(), |id| CharacterId { world, id: *id });
-            self.rows.push(character.row);
+            if let Some(row) = self.rows.get_mut(index) {
+                changed |= *row != character.row;
+                *row = character.row;
+            } else {
+                self.rows.push(character.row);
+            }
         }
+        self.rows.truncate(count);
         self.sequence += 1;
         self.status.availability = READY;
         self.last_capture = Some(Instant::now());
         self.status.message = Text::new("Live player roster available");
+        if changed {
+            roster_event(self.status.world, self.sequence, self.status.availability);
+        }
     }
     fn validate(&self, command: &CommandV1) -> Result<(), i32> {
         if self.status.availability != READY {
@@ -257,6 +302,38 @@ pub(crate) fn disable(transaction: &mut detour::Transaction) {
     native::disable(transaction);
 }
 pub(crate) fn start() {
+    if state()
+        .lock()
+        .is_ok_and(|s| s.status.availability != ADAPTER_UNAVAILABLE)
+    {
+        let publish = (|| {
+            let host = crate::extensions::internal_host("gameplay-observations", u64::MAX - 1)?;
+            let operations = rekenshi_plugin_sdk::operations::Operations::from_host(host.native())
+                .map_err(|e| e.to_string())?;
+            let descriptor = |name, schema| {
+                rekenshi_plugin_sdk::operations::Contract::new(name, schema,
+                "Native post-PlayerInterface update/reset; deferred copied occurrences on serial plugin lane",
+                "Kenshi executable fingerprint and PlayerInterface prologues verified by gameplay native adapter; roster changes and native dispatch result only; not world-loaded or navigation completion", 64).map(|c| c.events()).map_err(|e| e.to_string())
+            };
+            let roster = operations
+                .publish(descriptor(
+                    rekenshi_plugin_sdk::events::ROSTER_CHANGED,
+                    "rekenshi.roster-revision-le@1",
+                )?)
+                .map_err(|e| e.to_string())?;
+            let completed = operations
+                .publish(descriptor(
+                    rekenshi_plugin_sdk::events::COMMAND_COMPLETED,
+                    "rekenshi.command-result-le@1",
+                )?)
+                .map_err(|e| e.to_string())?;
+            *EVENTS.write().map_err(|_| "gameplay events lock")? = Some((roster, completed));
+            Ok::<_, String>(())
+        })();
+        if let Err(error) = publish {
+            crate::logging::write(&format!("gameplay event publication failed: {error}"));
+        }
+    }
     RUNNING.store(true, Ordering::Release);
 }
 pub(crate) fn stop() {
@@ -267,6 +344,12 @@ pub(crate) fn stop() {
     if let Ok(mut state) = state().lock() {
         state.invalidate(ADAPTER_UNAVAILABLE, "Gameplay host stopped", UNAVAILABLE);
         state.status.capabilities = 0;
+    }
+    if let Ok(mut events) = EVENTS.write() {
+        if let Some((mut roster, mut completed)) = events.take() {
+            let _ = roster.revoke();
+            let _ = completed.revoke();
+        }
     }
 }
 pub(crate) fn release(token: u64) {
@@ -371,6 +454,7 @@ pub(super) fn tick(player: usize) {
         if let Ok(mut state) = state().lock() {
             if let Some(slot) = state.results.get_mut(&(pending.token, pending.ticket)) {
                 *slot = result;
+                completed_event(pending.token, pending.ticket, result.state, result.code);
             }
         }
     }

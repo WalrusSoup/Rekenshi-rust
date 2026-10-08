@@ -2,4 +2,4 @@
 mod native;
 mod plugin;
 #[doc(inline)]
-pub use plugin::{ShaderCache, hits, start_legacy, stop};
+pub use plugin::{ShaderCache, hits, stop};

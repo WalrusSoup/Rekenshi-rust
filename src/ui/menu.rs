@@ -12,6 +12,8 @@ use std::ffi::{CStr, CString, c_void};
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use windows_sys::Win32::Foundation::HMODULE;
+#[path = "overlay.rs"]
+mod overlay;
 
 type Frame = unsafe extern "C" fn(*mut c_void, f32);
 type Click = unsafe extern "C" fn(*mut c_void);
@@ -52,6 +54,7 @@ struct Enumerator {
     end: usize,
 }
 struct Menu {
+    overlay: overlay::Api,
     frame: TypedDetour<Frame>,
     click: TypedDetour<Click>,
     enumerate: Enumerate,
@@ -104,6 +107,7 @@ pub(super) fn prepare(module: HMODULE) -> Result<(), String> {
             crate::extensions::reserve_core(address)?;
         }
         Menu {
+            overlay: overlay::Api::prepare(module)?,
             frame: TypedDetour::new(frame, frame_hook as Frame).map_err(|e| e.to_string())?,
             click: TypedDetour::new(click, click_hook as Click).map_err(|e| e.to_string())?,
             enumerate: std::mem::transmute::<super::ExportAddress, Enumerate>(symbol(
@@ -248,6 +252,11 @@ pub(crate) fn disable(tx: &mut Transaction<'_>) {
         tx.disable(&m.frame);
     }
 }
+pub(crate) fn stop_overlay() {
+    if let (Some(m), Some(ui)) = (MENU.get(), UI.get()) {
+        overlay::stop(m, &ui.api);
+    }
+}
 
 extern "C" fn frame_hook(gui: *mut c_void, delta: f32) {
     let Some(m) = MENU.get() else { return };
@@ -275,7 +284,10 @@ extern "C" fn frame_hook(gui: *mut c_void, delta: f32) {
         ELAPSED.with(|x| x.set(0.));
         // SAFETY: Same UI thread after the original frame; no native widget
         // pointers survive this call, and the adapter's binary is pinned.
-        unsafe { refresh(m, &ui.api, gui) };
+        unsafe {
+            overlay::refresh(m, &ui.api, gui);
+            refresh(m, &ui.api, gui);
+        }
     });
 }
 extern "C" fn click_hook(input: *mut c_void) {
