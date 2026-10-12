@@ -27,7 +27,8 @@ game=pathlib.Path(sys.argv[1]).resolve()
 # These private test calls are permitted only for the inspected native binaries.
 for name,expected in [
  ('kenshi_x64.exe','A596AB4E407C67B58599C54FFB32DC1BF2B64510CDEBD3FA9359EF05A576AEB1'),
- ('OgreMain_x64.dll','7D3888D21398647519F10A89B1F300D8606F761AD159E6021A797B1B9B3DF5F6')]:
+ ('OgreMain_x64.dll','7D3888D21398647519F10A89B1F300D8606F761AD159E6021A797B1B9B3DF5F6'),
+ ('RenderSystem_Direct3D11_x64.dll','5F224882DED5B6D3F68F14D6BB4E1762267BBB602B7B9733BD153663D1541BB9')]:
  assert hashlib.sha256((game/name).read_bytes()).hexdigest().upper()==expected,name
 stage=project/'target/instancing-geometry-tests'/uuid.uuid4().hex;stage.mkdir(parents=True)
 for n in ['kenshi_x64.exe','OgreMain_x64.dll','MyGUIEngine_x64.dll','RenderSystem_Direct3D11_x64.dll','D3DCompiler_43.dll']:shutil.copy2(game/n,stage/n)
@@ -47,14 +48,8 @@ m.function(ogre,'??0Root@Ogre@@',C.c_void_p,[C.c_void_p,C.POINTER(m.String),C.PO
 renderer.dllStartPlugin();assert m.function(ogre,'?restoreConfig@Root@Ogre@@',C.c_bool,[C.c_void_p])(root)
 m.function(ogre,'?initialise@Root@Ogre@@',C.c_void_p,[C.c_void_p,C.c_bool,C.POINTER(m.String),C.POINTER(m.String)])(root,False,C.byref(empty),C.byref(empty))
 print('native Ogre GPU ready',flush=True)
-# Borrowed VC100 const map: node value precedes flags, container head at +8.
-# Only the fingerprinted renderer reads it; no ownership crosses the call.
-class MapNode(C.Structure):
- _fields_=[('left',C.c_void_p),('parent',C.c_void_p),('right',C.c_void_p),('key',m.String),('value',m.String),('color',C.c_ubyte),('nil',C.c_ubyte),('pad',C.c_ubyte*6)]
-class Map(C.Structure): _fields_=[('allocator',C.c_size_t),('head',C.c_void_p),('size',C.c_size_t)]
-head=MapNode();entry=MapNode();head.left=head.parent=head.right=C.addressof(entry);head.nil=1;head.color=1
-entry.left=entry.right=entry.parent=C.addressof(head);entry.color=1;entry.key=m.String('hidden');entry.value=m.String('true');params=Map(0,C.addressof(head),1)
-window=m.function(ogre,'?createRenderWindow@Root@Ogre@@',C.c_void_p,[C.c_void_p,C.POINTER(m.String),C.c_uint32,C.c_uint32,C.c_bool,C.POINTER(Map)])(root,C.byref(m.String('native-batch-test')),64,64,False,C.byref(params));assert window
+params=m.WindowParameters()
+window=m.function(ogre,'?createRenderWindow@Root@Ogre@@',C.c_void_p,[C.c_void_p,C.POINTER(m.String),C.c_uint32,C.c_uint32,C.c_bool,C.POINTER(m.WindowParameters)])(root,C.byref(m.String('native-batch-test')),64,64,False,C.byref(params));assert window
 print('hidden native render window ready',flush=True)
 scene=m.function(ogre,'?createSceneManager@Root@Ogre@@QEAAPEAVSceneManager@2@G',C.c_void_p,[C.c_void_p,C.c_uint16,C.c_size_t,C.c_int,C.POINTER(m.String)])(root,1,1,1,C.byref(empty));assert scene
 node=m.function(ogre,'?getRootSceneNode@SceneManager',C.c_void_p,[C.c_void_p,C.c_int])(scene,1);assert node

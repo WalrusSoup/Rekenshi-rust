@@ -19,6 +19,36 @@ class String(C.Structure):
         else:
             self.buffer=C.create_string_buffer(value); self.capacity=len(value)
             C.c_void_p.from_address(C.addressof(self)).value=C.addressof(self.buffer)
+
+class WindowParameterNode(C.Structure):
+    # The shipped renderer's map uses 0x28-byte slots for each string, even
+    # though String models only the 0x20-byte data/length/capacity prefix.
+    # RenderSystem_Direct3D11_x64.dll SHA-256:
+    # 5F224882DED5B6D3F68F14D6BB4E1762267BBB602B7B9733BD153663D1541BB9
+    # RVA 0x304f0 reads key +0x18, 0x304f4 value +0x40, and 0x3052b nil +0x69.
+    _fields_=[('left',C.c_void_p),('parent',C.c_void_p),('right',C.c_void_p),
+              ('key',String),('key_padding',C.c_size_t),
+              ('value',String),('value_padding',C.c_size_t),
+              ('color',C.c_ubyte),('nil',C.c_ubyte),('pad',C.c_ubyte*6)]
+
+class WindowParameters(C.Structure):
+    """Borrowed single-entry VC100 map; keep its nodes alive during native reads."""
+    _fields_=[('allocator',C.c_size_t),('head',C.c_void_p),('size',C.c_size_t)]
+
+    def __init__(self):
+        super().__init__()
+        self._head=WindowParameterNode()
+        self._entry=WindowParameterNode()
+        head,entry=self._head,self._entry
+        head.left=head.parent=head.right=C.addressof(entry)
+        head.nil=head.color=1
+        entry.left=entry.parent=entry.right=C.addressof(head)
+        entry.color=1
+        entry.key=String('hidden')
+        entry.value=String('true')
+        self.head=C.addressof(head)
+        self.size=1
+
 class Shared(C.Structure):
     _fields_=[('object',C.c_void_p),('info',C.c_void_p)]
 class Result(C.Structure):
