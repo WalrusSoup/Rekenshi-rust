@@ -138,7 +138,7 @@ rekenshi-weather.workspace = true
 serde = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
 toml = { workspace = true }
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Diagnostics_Debug"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Diagnostics_Debug", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
 
 [profile.release]
 lto = "thin"

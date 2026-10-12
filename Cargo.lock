@@ -467,6 +467,8 @@ dependencies = [
  "rekenshi-plugin-api",
  "rekenshi-plugin-runtime",
  "rekenshi-plugin-sdk",
+ "serde",
+ "serde_json",
  "windows",
 ]
 

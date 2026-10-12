@@ -15,7 +15,7 @@ const SETTINGS: &[Setting] = &[
     Setting {
         key: "debug.overlay",
         label: "Debug overlay",
-        description: "Show recent logs, plugin status and observed public operation counts. Mouse input passes through.",
+        description: "Show recent logs, plugin status and observed public operation counts. F11 toggles visibility for this session.",
         default: Value::Toggle(false),
         control: Control::Toggle,
     },
@@ -61,6 +61,15 @@ fn apply(settings: &Settings) {
 pub(crate) fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
+pub(crate) fn toggle() {
+    let enabled = !ENABLED.fetch_xor(true, Ordering::Relaxed);
+    crate::platform::diagnostics_enabled(enabled);
+    crate::logging::write(if enabled {
+        "debug overlay: shown with F11"
+    } else {
+        "debug overlay: hidden with F11"
+    });
+}
 pub(crate) fn frozen() -> bool {
     FROZEN.load(Ordering::Relaxed)
 }
@@ -92,7 +101,7 @@ pub(crate) fn record(message: &str) {
 }
 pub(crate) fn snapshot() -> String {
     let mut lines = vec![
-        "RE_Kenshi Rust | Developer diagnostics".into(),
+        "RE_Kenshi Rust | Developer diagnostics | F11: show/hide".into(),
         format!(
             "Host {} | internal {} | DLLs {} | failed DLLs {} | Ogre calls {}{}",
             crate::STATUS.load(Ordering::Relaxed),
@@ -111,6 +120,7 @@ pub(crate) fn snapshot() -> String {
         crate::rekenshi_heightmap_cache_reads(),
     ));
     lines.extend(crate::platform::diagnostics());
+    lines.push(rekenshi_graphics::landscape_diagnostics());
     lines.push("Recent logs (UTC) | counts accumulate while overlay is enabled".into());
     if let Ok(logs) = LOGS.try_lock() {
         lines.extend(logs.iter().rev().take(12).rev().cloned());

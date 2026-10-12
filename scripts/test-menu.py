@@ -9,14 +9,23 @@ import xml.etree.ElementTree as E
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-def resources():
+def font_resources():
+    return b'''<MyGUI type="Resource" version="1.1">
+      <Resource type="ResourceManualFont" name="Kenshi_StandardFont_Medium">
+        <Property key="Source" value="fixture"/>
+        <Property key="DefaultHeight" value="14"/>
+        <Codes><Code index="32" coord="0 0 1 1"/></Codes>
+      </Resource></MyGUI>'''
+
+def resources(fonts=True):
     root = E.parse(ROOT / 'tests/fixtures/menu-resources.xml').getroot()
     skin = next(r for r in root if r.get('name') == 'Kenshi_TextBoxEmptySkin')
     basis = E.SubElement(skin, 'BasisSkin', type='SimpleText', offset='0 0 100 30', align='Stretch')
     E.SubElement(basis, 'State', name='normal', colour='1 1 1')
+    if fonts: root.extend(E.fromstring(font_resources()))
     return E.tostring(root)
 
-def child(folder):
+def child(folder, early_fonts=False):
     ogre = C.CDLL(str(folder / 'OgreMain_x64.dll'))
     compiler = C.CDLL(str(folder / 'D3DCompiler_43.dll'))
     native = C.CDLL(str(folder / 'native-menu.dll'))
@@ -42,9 +51,24 @@ def child(folder):
         key = key.encode()
         assert host.rekenshi_plugin_setting_set(key, len(key), 1, float(value)) == 0
     native.menu_count.restype = C.c_size_t
-    native.menu_setup(resources())
+    native.menu_load_resources.argtypes = [C.c_char_p]
+    native.menu_refresh_font.argtypes = [C.c_void_p]
+    native.menu_setup(resources(fonts=not early_fonts))
     host.dllStartPlugin()
     assert host.rekenshi_status() == 1
+    if early_fonts:
+        native.menu_hide(True)
+        setting('debug.overlay', True)
+        native.menu_frame()
+        assert not native.menu_find(b'RKDebug.overlay'), 'do not create captioned native text before the font resource exists'
+        native.menu_load_resources(font_resources())
+        native.menu_frame()
+        body = native.menu_find(b'RKDebug.text')
+        assert body and b'Developer diagnostics' in native.menu_caption(body), 'activate from actual font availability'
+        native.menu_refresh_font(body)
+        host.dllStopPlugin(); native.menu_shutdown()
+        print('PASS: overlay waits for the native font and survives Kenshi font refresh')
+        return
     native.menu_frame()
     tab = native.menu_tab()
     assert tab, 'REKENSHI-RUST native Options tab is missing'
@@ -137,6 +161,7 @@ def child(folder):
     assert not native.menu_needs_mouse(overlay) and not native.menu_needs_mouse(body)
     assert not native.menu_inherits_pick(overlay), 'overlay cannot capture HUD input'
     caption = native.menu_caption(body)
+    native.menu_refresh_font(body)
     assert b'Developer diagnostics' in caption and b'debug.overlay applied' in caption
     assert b'Contracts:' in caption and b'calls' in caption
     native.menu_hide(True); native.menu_frame()
@@ -164,8 +189,8 @@ def child(folder):
     print('PASS: native Options lifecycle and toggleable debug overlay, copied logs, freeze, click-through, recreation, persistence and shutdown')
 
 if __name__ == '__main__':
-    if sys.argv[1] == '--child':
-        child(pathlib.Path(sys.argv[2]))
+    if sys.argv[1] in ['--child', '--early-fonts']:
+        child(pathlib.Path(sys.argv[2]), early_fonts=sys.argv[1] == '--early-fonts')
     else:
         folder = ROOT / 'target/menu-tests' / uuid.uuid4().hex
         folder.mkdir(parents=True)
@@ -182,3 +207,4 @@ if __name__ == '__main__':
         shutil.copy2(ROOT / 'target/release/rekenshi_kenshi2_style.dll', config / 'plugins/rekenshi_kenshi2_style.dll')
         (config / 'plugins.toml').write_text('schema_version=1\ndiscover=true\nplugins=[]\n')
         subprocess.run([sys.executable, __file__, '--child', str(folder)], cwd=folder, check=True)
+        subprocess.run([sys.executable, __file__, '--early-fonts', str(folder)], cwd=folder, check=True)

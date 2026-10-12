@@ -11,3 +11,5 @@ schema_version = 1
 "weather.tone_down" = true
 "debug.overlay" = false
 "debug.freeze" = false
+"graphics.resource_capture" = false
+"graphics.landscape_instancing" = false

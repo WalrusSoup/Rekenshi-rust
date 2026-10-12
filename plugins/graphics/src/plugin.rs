@@ -52,6 +52,20 @@ const SETTINGS: &[Setting] = &[
             step: 1.,
         },
     },
+    Setting {
+        key: "graphics.resource_capture",
+        label: "Capture graphics resources",
+        description: "Record texture/buffer sizes and lifetimes to graphics-captures. Enable before restart for startup coverage. Diagnostic overhead; applies immediately.",
+        default: Value::Toggle(false),
+        control: Control::Toggle,
+    },
+    Setting {
+        key: "graphics.landscape_instancing",
+        label: "Share scenery geometry (experimental)",
+        description: "Use shared meshes and per-placement transforms for supported static scenery. Affects newly loaded regions; reload your save after changing. Unsupported batches keep normal rendering.",
+        default: Value::Toggle(false),
+        control: Control::Toggle,
+    },
 ];
 
 impl Plugin for GraphicsBackend {
@@ -59,7 +73,7 @@ impl Plugin for GraphicsBackend {
         "graphics"
     }
     fn title(&self) -> &'static str {
-        "Ambient occlusion"
+        "Graphics"
     }
     fn settings(&self) -> &'static [Setting] {
         SETTINGS
@@ -132,7 +146,7 @@ impl Plugin for GraphicsBackend {
     }
     fn settings_changed(
         &mut self,
-        _: &Context,
+        context: &Context,
         settings: &Settings,
     ) -> Result<(), rekenshi_plugin_runtime::Error> {
         let enabled = settings.enabled(SETTINGS[0].key);
@@ -154,6 +168,8 @@ impl Plugin for GraphicsBackend {
             .parameters
             .write()
             .map_err(|_| "AO policy lock poisoned")? = parameters;
+        native::capture::configure(&context.root, settings.enabled("graphics.resource_capture"))?;
+        native::instancing::configure(settings.enabled("graphics.landscape_instancing"))?;
         Ok(())
     }
     fn stop(&mut self) -> Result<(), rekenshi_plugin_runtime::Error> {

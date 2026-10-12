@@ -273,18 +273,22 @@ extern "C" fn frame_hook(gui: *mut c_void, delta: f32) {
             return;
         }
         let Some(ui) = UI.get() else { return };
+        let toggled = overlay::hotkey();
         let elapsed = ELAPSED.with(|x| {
             let next = x.get() + delta.max(0.);
             x.set(next);
             next
         });
-        if elapsed < 0.5 {
+        if elapsed < 0.5 && !toggled {
             return;
         }
         ELAPSED.with(|x| x.set(0.));
         // SAFETY: Same UI thread after the original frame; no native widget
         // pointers survive this call, and the adapter's binary is pinned.
         unsafe {
+            if let Err(error) = rekenshi_graphics::resource_capture_tick() {
+                crate::logging::write(&format!("graphics resource capture: {error}"));
+            }
             overlay::refresh(m, &ui.api, gui);
             refresh(m, &ui.api, gui);
         }

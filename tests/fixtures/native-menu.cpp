@@ -188,6 +188,22 @@ extern "C" __declspec(dllexport) void* menu_find(const char* name) { return gui-
 extern "C" __declspec(dllexport) const char* menu_caption(MyGUI::TextBox* widget) {
     return widget->MyGUI::TextBox::getCaption().asUTF8_c_str();
 }
+extern "C" __declspec(dllexport) void menu_load_resources(const char* resources) {
+    static_cast<HeadlessData*>(MyGUI::DataManager::getInstancePtr())->resources = resources;
+    MyGUI::ResourceManager::getInstance().load("late-font.xml");
+}
+extern "C" __declspec(dllexport) void menu_refresh_font(MyGUI::Widget* widget) {
+    using Text = void* (*)(void*);
+    auto get_text = reinterpret_cast<Text>(GetProcAddress(GetModuleHandleA("MyGUIEngine_x64.dll"), "?getSubWidgetText@SkinItem@MyGUI@@QEAAPEAVISubWidgetText@2@XZ"));
+    // Shipped Widget->SkinItem offset from Kenshi's caller; do not use the
+    // current compiler's C++ base layout for this old native object.
+    auto text = get_text(reinterpret_cast<unsigned char*>(widget) + 0x288);
+    if (!text) return;
+    // Exact shipped ISubWidgetText slots used by Kenshi at RVA 0x3e7fd7/0x3e7fe3.
+    auto table = *reinterpret_cast<void***>(text);
+    auto font = reinterpret_cast<const void* (*)(void*)>(table[0x138 / 8])(text);
+    reinterpret_cast<void (*)(void*, const void*)>(table[0x130 / 8])(text, font);
+}
 extern "C" __declspec(dllexport) void* menu_parent(MyGUI::Widget* widget) { return widget->getParent(); }
 extern "C" __declspec(dllexport) bool menu_visible(MyGUI::Widget* widget) {
     for (auto w = widget; w; w = w->getParent()) if (!w->getVisible()) return false;

@@ -1,4 +1,11 @@
-//! Native Direct3D11 post-tonemap effect service. Does not use Kenshi private RVAs.
+//! Native Direct3D11 post-tonemap effects and opt-in resource diagnostics.
+//! Forest batch diagnostics additionally require fingerprinted Kenshi bindings.
+pub(crate) mod capture;
+#[cfg(test)]
+mod instances;
+pub(crate) mod instancing;
+mod instancing_geometry;
+mod instancing_material;
 mod pipeline;
 mod shader;
 mod ssao;
@@ -128,6 +135,7 @@ pub(super) fn initialize(host: HostV1, root: &std::path::Path) -> Result<(), Str
         result.map_err(|e| e.to_string())?;
         let context = context.ok_or("no D3D context")?;
         let device = device.ok_or("no D3D device")?;
+        capture::prepare(host, &device, &context, &game)?;
         let address = Interface::vtable(&context).Draw as *const c_void;
         // SAFETY: The typed COM vtable identifies exactly ID3D11DeviceContext::Draw.
         let target: Draw = unsafe { std::mem::transmute(address) };
@@ -215,6 +223,12 @@ pub(super) fn stop() -> i32 {
             return ERROR;
         }
         ACTIVE.store(false, Ordering::Release);
+        if instancing::configure(false).is_err() {
+            return ERROR;
+        }
+        if capture::configure(std::path::Path::new("."), false).is_err() {
+            return ERROR;
+        }
         if let Some(h) = HOOKS.get() {
             let mut tx = Transaction::new();
             tx.disable(&h.draw);

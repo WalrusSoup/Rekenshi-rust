@@ -7,6 +7,8 @@ Push-Location -LiteralPath $projectRoot
 try {
     python (Join-Path $PSScriptRoot 'test-symbols.py')
     if ($LASTEXITCODE -ne 0) { throw 'Native symbol scanner tests failed.' }
+    python (Join-Path $PSScriptRoot 'test-instance-cache.py')
+    if ($LASTEXITCODE -ne 0) { throw 'Instance cache validation failed.' }
     cargo fmt --all -- --check
     if ($LASTEXITCODE -ne 0) { throw 'Formatting check failed.' }
     cargo clippy --all-targets --workspace --locked -- -D warnings
@@ -55,6 +57,14 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Native exception/reference fixture build failed.' }
         python (Join-Path $PSScriptRoot 'test-performance.py') $KenshiDir
         if ($LASTEXITCODE -ne 0) { throw 'Native DDS, SIC or collider integration tests failed.' }
+        python (Join-Path $PSScriptRoot 'test-batch-capture.py') $KenshiDir
+        if ($LASTEXITCODE -ne 0) { throw 'Native forest batch provenance/GPU byte parity failed.' }
+        python (Join-Path $PSScriptRoot 'test-native-instancing.py') $KenshiDir
+        if ($LASTEXITCODE -ne 0) { throw 'Native hardware instance allocation/lifetime fixture failed.' }
+        python (Join-Path $PSScriptRoot 'test-instancing-material.py') $KenshiDir
+        if ($LASTEXITCODE -ne 0) { throw 'Native instanced object/shadow material lifecycle failed.' }
+        python (Join-Path $PSScriptRoot 'test-instancing-geometry.py') $KenshiDir
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime Forest instancing draw/rebuild/fallback lifecycle failed.' }
         $oldTestGame = $env:REKENSHI_TEST_GAME
         try {
             $env:REKENSHI_TEST_GAME = $KenshiDir
@@ -62,6 +72,8 @@ try {
             if ($LASTEXITCODE -ne 0) { throw 'Managed Ogre/MyGUI callback integration test failed.' }
             cargo test -p rekenshi-graphics --test public_gpu --locked -- --ignored
             if ($LASTEXITCODE -ne 0) { throw 'Independent native shader-binding/effect GPU parity failed.' }
+            cargo test -p rekenshi-graphics --test resource_capture_gpu --locked -- --ignored
+            if ($LASTEXITCODE -ne 0) { throw 'Native graphics resource capture/lifetime parity failed.' }
             cargo test -p rekenshi-graphics -p rekenshi-heightmap-cache --lib --locked -- --ignored
             if ($LASTEXITCODE -ne 0) { throw 'GPU output/state or native heightmap differential test failed.' }
         } finally { $env:REKENSHI_TEST_GAME = $oldTestGame }
